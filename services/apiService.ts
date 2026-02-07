@@ -17,18 +17,18 @@ export interface EvaluationResult {
 
 /**
  * Unified API Agent Caller.
- * Calls the local FastAPI backend (/v1/chat/completions) in OpenAI format.
+ * Calls the local FastAPI backend (/v1/ielts/evaluate) with multipart form data.
  */
 export const callIELTSAgent = async (audioBlob: Blob, part: string, question: string, userLevel: string = "6.0-6.5"): Promise<EvaluationResult> => {
   try {
     const formData = new FormData();
-    formData.append('audio', audioBlob, 'response.wav');
-    formData.append('part', part);
-    formData.append('question', question);
-    formData.append('level', userLevel);
+    formData.append("audio", audioBlob, "response.wav");
+    formData.append("part", part);
+    formData.append("question", question);
+    formData.append("level", userLevel);
 
-    const response = await fetch('http://localhost:8000/v1/chat/completions', {
-      method: 'POST',
+    const response = await fetch("http://localhost:8000/v1/ielts/evaluate", {
+      method: "POST",
       body: formData,
     });
 
@@ -46,9 +46,8 @@ export const callIELTSAgent = async (audioBlob: Blob, part: string, question: st
       scores: metadata.scores,
       agent_thoughts: metadata.agent_thoughts,
       feedback: assistantMessage.content,
-      xpReward: metadata.xp_reward
+      xpReward: metadata.xp_reward,
     };
-
   } catch (error: any) {
     console.error("Agentic Link Error:", error);
     return {
@@ -56,4 +55,7 @@ export const callIELTSAgent = async (audioBlob: Blob, part: string, question: st
       scores: { fluency: 0, lexical: 0, grammar: 0, pronunciation: 0 },
       agent_thoughts: ["Connection lost to http://localhost:8000"],
       feedback: "The examiner has disconnected. Please verify your backend server is active.",
-      xpReward: 0
+      xpReward: 0,
+    };
+  }
+};

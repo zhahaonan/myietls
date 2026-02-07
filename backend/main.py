@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form, Header, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
@@ -29,17 +29,17 @@ class ChatMessage(BaseModel):
 class ChatCompletionRequest(BaseModel):
     model: str = "myielts-multi-agent"
     messages: List[ChatMessage]
-    stream: bool = False
+    metadata: Optional[Dict[str, Any]] = None
 
-@app.post("/v1/chat/completions")
-async def chat_completions(
+@app.post("/v1/ielts/evaluate")
+async def ielts_evaluate(
     audio: Optional[UploadFile] = File(None),
     part: str = Form("P1"),
     question: str = Form(""),
     level: str = Form("6.0-6.5")
 ):
     """
-    Unified OpenAI-compatible endpoint for IELTS evaluation.
+    Multipart endpoint for IELTS evaluation.
     Handles multipart form data for audio processing via Camel Multi-Agent logic.
     """
     try:
@@ -87,6 +87,36 @@ async def chat_completions(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+
+@app.post("/v1/chat/completions")
+async def chat_completions(payload: ChatCompletionRequest):
+    """
+    Standard OpenAI-style JSON chat endpoint (minimal STEP1 implementation).
+    """
+    last_user_message = ""
+    for message in reversed(payload.messages):
+        if message.role == "user":
+            last_user_message = message.content
+            break
+
+    content = last_user_message or "No user message provided."
+
+    return {
+        "id": f"chatcmpl-{int(time.time())}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": payload.model,
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": content
+                },
+                "finish_reason": "stop"
+            }
+        ]
+    }
 
 @app.get("/api/question-bank")
 async def get_bank():
