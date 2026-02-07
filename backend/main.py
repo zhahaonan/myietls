@@ -5,8 +5,10 @@ from typing import List, Optional, Dict, Any
 import os
 import time
 import json
+import re
 from engine.camel_agents import CamelIELTSAgent
 from engine.rag import AgenticRAG
+from engine import openai_client
 
 app = FastAPI(title="MyIELTS Multi-Agent OpenAI-Style API")
 
@@ -30,6 +32,40 @@ class ChatCompletionRequest(BaseModel):
     model: str = "myielts-multi-agent"
     messages: List[ChatMessage]
     metadata: Optional[Dict[str, Any]] = None
+
+
+def _get_last_user_message(messages: List[ChatMessage]) -> str:
+    for message in reversed(messages):
+        if message.role == "user":
+            return message.content
+    return ""
+
+
+def _extract_error_code(error: Exception) -> str:
+    message = str(error)
+
+    if "Missing OPENAI_API_KEY" in message:
+        return "missing_api_key"
+    if "Missing OPENAI_MODEL" in message:
+        return "missing_model"
+    if "OpenAI API connection failed" in message:
+        return "connection_error"
+
+    m = re.search(r"OpenAI API request failed \((\d{3})\):\s*(.*)", message, re.DOTALL)
+    if m:
+        status = m.group(1)
+        detail = m.group(2).strip()
+        try:
+            parsed = json.loads(detail)
+            code = parsed.get("error", {}).get("code")
+            if isinstance(code, str) and code.strip():
+                return code
+        except Exception:
+            pass
+
+        return f"http_{status}"
+
+    return "unknown_error"
 
 @app.post("/v1/ielts/evaluate")
 async def ielts_evaluate(
@@ -91,21 +127,24 @@ async def ielts_evaluate(
 @app.post("/v1/chat/completions")
 async def chat_completions(payload: ChatCompletionRequest):
     """
-    Standard OpenAI-style JSON chat endpoint (minimal STEP1 implementation).
+    Standard OpenAI-style JSON chat endpoint backed by an OpenAI-compatible model.
     """
-    last_user_message = ""
-    for message in reversed(payload.messages):
-        if message.role == "user":
-            last_user_message = message.content
-            break
+    last_user_message = _get_last_user_message(payload.messages)
 
-    content = last_user_message or "No user message provided."
+    try:
+        content = openai_client.chat(
+            messages=[{"role": m.role, "content": m.content} for m in payload.messages]
+        )
+    except RuntimeError as exc:
+        error_code = _extract_error_code(exc)
+        fallback = last_user_message or "Sorry, I cannot answer that right now."
+        content = f"LLM unavailable: {error_code}\nFallback: {fallback}"
 
     return {
         "id": f"chatcmpl-{int(time.time())}",
         "object": "chat.completion",
         "created": int(time.time()),
-        "model": payload.model,
+        "model": os.getenv("OPENAI_MODEL", payload.model),
         "choices": [
             {
                 "index": 0,
