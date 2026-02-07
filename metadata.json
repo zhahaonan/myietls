@@ -1,0 +1,8 @@
+{
+  "name": "MyIELTS Voice",
+  "description": "A gamified AI IELTS speaking coach with structured two-step practice and immersive mock tests.",
+  "requestFramePermissions": [
+    "microphone",
+    "camera"
+  ]
+}
