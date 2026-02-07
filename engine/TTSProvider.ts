@@ -1,13 +1,8 @@
 
-/**
- * Alibaba Cloud DashScope TTS Provider
- * Model: qwen3-tts-instruct-flash-realtime-2026-01-22
- */
 export class TTSProvider {
   private static instance: TTSProvider;
-  private apiKey: string = "sk-784cbf391952467882f20b1eebfa6fcd";
+  private apiBase: string = import.meta.env.VITE_API_BASE || "http://localhost:8000";
   private model: string = "qwen3-tts-instruct-flash-realtime-2026-01-22";
-  private apiEndpoint: string = "https://dashscope.aliyuncs.com/api/v1/services/audio/tts/text-to-audio";
 
   private constructor() {}
 
@@ -18,36 +13,24 @@ export class TTSProvider {
     return TTSProvider.instance;
   }
 
-  /**
-   * Main method to speak text.
-   * Encapsulates the logic for Aliyun API call and audio playback.
-   */
   public async speak(text: string, voice: string = "cherry"): Promise<void> {
     try {
-      const response = await fetch(this.apiEndpoint, {
+      const response = await fetch(`${this.apiBase}/v1/audio/speech`, {
         method: "POST",
         headers: {
-          "Authorization": `Bearer ${this.apiKey}`,
           "Content-Type": "application/json",
-          "X-DashScope-Data-Inspection": "enable"
         },
         body: JSON.stringify({
+          input: text,
+          voice,
+          format: "wav",
           model: this.model,
-          input: { text },
-          parameters: {
-            voice,
-            format: "wav",
-            sample_rate: 24000,
-            volume: 50,
-            rate: 1.0,
-            pitch: 1.0
-          }
         })
       });
 
       if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.message || "Aliyun TTS Error");
+        const errorText = await response.text();
+        throw new Error(errorText || "Backend TTS error");
       }
 
       const audioBlob = await response.blob();
@@ -66,7 +49,7 @@ export class TTSProvider {
         audio.play().catch(reject);
       });
     } catch (err) {
-      console.warn("Aliyun TTS failed, using native fallback:", err);
+      console.warn("Backend TTS failed, using native fallback:", err);
       return this.fallbackSpeak(text);
     }
   }

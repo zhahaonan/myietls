@@ -1,7 +1,7 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Literal
 import os
 import time
 import json
@@ -9,6 +9,7 @@ import re
 from engine.camel_agents import CamelIELTSAgent
 from engine.rag import AgenticRAG
 from engine import openai_client
+from engine.tts import synthesize_speech
 
 app = FastAPI(title="MyIELTS Multi-Agent OpenAI-Style API")
 
@@ -32,6 +33,13 @@ class ChatCompletionRequest(BaseModel):
     model: str = "myielts-multi-agent"
     messages: List[ChatMessage]
     metadata: Optional[Dict[str, Any]] = None
+
+
+class SpeechRequest(BaseModel):
+    input: str
+    voice: Optional[str] = None
+    format: Literal["wav", "mp3"] = "wav"
+    model: Optional[str] = None
 
 
 def _get_last_user_message(messages: List[ChatMessage]) -> str:
@@ -156,6 +164,31 @@ async def chat_completions(payload: ChatCompletionRequest):
             }
         ]
     }
+
+
+@app.post("/v1/audio/speech")
+async def audio_speech(payload: SpeechRequest):
+    text = payload.input.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Field 'input' cannot be empty.")
+
+    try:
+        audio_bytes, content_type = synthesize_speech(
+            text=text,
+            voice=payload.voice,
+            audio_format=payload.format,
+            model=payload.model,
+        )
+    except RuntimeError as exc:
+        message = str(exc)
+        status_code = 502
+        if "Missing DASHSCOPE_API_KEY" in message:
+            status_code = 500
+        if "Unsupported format" in message:
+            status_code = 400
+        raise HTTPException(status_code=status_code, detail=message) from exc
+
+    return Response(content=audio_bytes, media_type=content_type)
 
 @app.get("/api/question-bank")
 async def get_bank():

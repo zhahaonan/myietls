@@ -3,6 +3,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { callIELTSAgent, speakWithAliyun } from '../services/apiService';
 import { TestScore, UserProfile } from '../types';
 import PixelAvatar from './PixelAvatar';
+import WaveformCanvas from './WaveformCanvas';
 
 interface MockTestProps {
   profile: UserProfile;
@@ -27,6 +28,9 @@ const MockTest: React.FC<MockTestProps> = ({ onComplete, onCancel, profile }) =>
   const [radarData, setRadarData] = useState({ fluency: 0, lexical: 0, grammar: 0, pronunciation: 0 });
   const [finalFeedback, setFinalFeedback] = useState("");
   const [currentQuestionText, setCurrentQuestionText] = useState("Could you describe a beautiful place you've visited recently?");
+  const [recordingStream, setRecordingStream] = useState<MediaStream | null>(null);
+  const [recordedAudioBlob, setRecordedAudioBlob] = useState<Blob | null>(null);
+  const [ttsAudioBlob, setTtsAudioBlob] = useState<Blob | null>(null);
   
   // Part 2 Specific States
   const [p2Stage, setP2Stage] = useState<'none' | 'prep' | 'speak'>('none');
@@ -37,6 +41,9 @@ const MockTest: React.FC<MockTestProps> = ({ onComplete, onCancel, profile }) =>
   const videoRef = useRef<HTMLVideoElement>(null);
   const terminalRef = useRef<HTMLDivElement>(null);
   const timerIntervalRef = useRef<number | null>(null);
+  const ttsAudioRef = useRef<HTMLAudioElement | null>(null);
+  const ttsUrlRef = useRef<string | null>(null);
+  const apiBase = import.meta.env.VITE_API_BASE || "http://localhost:8000";
 
   useEffect(() => {
     if (terminalRef.current) {
@@ -76,6 +83,54 @@ const MockTest: React.FC<MockTestProps> = ({ onComplete, onCancel, profile }) =>
     return () => { if (timerIntervalRef.current) clearInterval(timerIntervalRef.current); };
   }, [timer, p2Stage]);
 
+  const playAudioBlob = async (audioBlob: Blob) => {
+    const url = URL.createObjectURL(audioBlob);
+    const audio = new Audio(url);
+    ttsUrlRef.current = url;
+    ttsAudioRef.current = audio;
+
+    await new Promise<void>((resolve, reject) => {
+      audio.onended = () => resolve();
+      audio.onerror = () => reject(new Error('TTS playback failed'));
+      audio.play().catch(reject);
+    });
+  };
+
+  const speakWithWaveform = async (text: string, voice?: string) => {
+    try {
+      const response = await fetch(`${apiBase}/v1/audio/speech`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          input: text,
+          voice: voice || "cherry",
+          format: "wav",
+          model: "qwen3-tts-instruct-flash-realtime-2026-01-22",
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+
+      const blob = await response.blob();
+      setTtsAudioBlob(blob);
+      await playAudioBlob(blob);
+    } catch (err) {
+      console.warn("Waveform TTS proxy failed, fallback to provider:", err);
+      setTtsAudioBlob(null);
+      await speakWithAliyun(text, voice);
+    } finally {
+      if (ttsUrlRef.current) {
+        URL.revokeObjectURL(ttsUrlRef.current);
+        ttsUrlRef.current = null;
+      }
+      ttsAudioRef.current = null;
+    }
+  };
+
   const startExam = async () => {
     setStage('exam');
     setAgentContext(prev => ({ ...prev, isSpeaking: true }));
@@ -83,14 +138,14 @@ const MockTest: React.FC<MockTestProps> = ({ onComplete, onCancel, profile }) =>
     if (currentPart === 2) {
       await startP2Flow();
     } else {
-      await speakWithAliyun(currentQuestionText, selectedExaminer.voice);
+      await speakWithWaveform(currentQuestionText, selectedExaminer.voice);
       setAgentContext(prev => ({ ...prev, isSpeaking: false }));
     }
   };
 
   const startP2Flow = async () => {
     setCurrentQuestionText("Describe a skill you have learned that you think is very useful. You should say: what it is, when you learned it, how you learned it and explain why you think it is useful.");
-    await speakWithAliyun("Now, I'm going to give you a topic and I'd like you to talk about it for one to two minutes. Before you talk, you'll have one minute to think about what you're going to say. You can make some notes if you wish. Here is your topic.");
+    await speakWithWaveform("Now, I'm going to give you a topic and I'd like you to talk about it for one to two minutes. Before you talk, you'll have one minute to think about what you're going to say. You can make some notes if you wish. Here is your topic.", selectedExaminer.voice);
     setP2Stage('prep');
     setTimer(60); // 1 minute prep
     setAgentContext(prev => ({ ...prev, isSpeaking: false }));
@@ -99,7 +154,7 @@ const MockTest: React.FC<MockTestProps> = ({ onComplete, onCancel, profile }) =>
   const startP2Speaking = async () => {
     setP2Stage('speak');
     setTimer(120); // 2 minutes speak
-    await speakWithAliyun("All right. Remember, you have one to two minutes for this, so don't worry if I stop you. I will tell you when the time is up. Please start speaking now.");
+    await speakWithWaveform("All right. Remember, you have one to two minutes for this, so don't worry if I stop you. I will tell you when the time is up. Please start speaking now.", selectedExaminer.voice);
     startRecording();
   };
 
@@ -107,11 +162,15 @@ const MockTest: React.FC<MockTestProps> = ({ onComplete, onCancel, profile }) =>
     if (agentContext.isSpeaking) return;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      setRecordingStream(stream);
+      setRecordedAudioBlob(null);
       mediaRecorderRef.current = new MediaRecorder(stream);
       audioChunksRef.current = [];
       mediaRecorderRef.current.ondataavailable = (e) => audioChunksRef.current.push(e.data);
       mediaRecorderRef.current.onstop = () => {
         const blob = new Blob(audioChunksRef.current, { type: 'audio/wav' });
+        setRecordedAudioBlob(blob);
+        setRecordingStream(null);
         handleResponseComplete(blob);
       };
       mediaRecorderRef.current.start();
@@ -126,8 +185,23 @@ const MockTest: React.FC<MockTestProps> = ({ onComplete, onCancel, profile }) =>
       mediaRecorderRef.current.stop();
       mediaRecorderRef.current.stream.getTracks().forEach(t => t.stop());
       setIsRecording(false);
+      setRecordingStream(null);
     }
   };
+
+  useEffect(() => {
+    return () => {
+      if (recordingStream) {
+        recordingStream.getTracks().forEach(t => t.stop());
+      }
+      if (ttsAudioRef.current) {
+        ttsAudioRef.current.pause();
+      }
+      if (ttsUrlRef.current) {
+        URL.revokeObjectURL(ttsUrlRef.current);
+      }
+    };
+  }, [recordingStream]);
 
   const handleResponseComplete = async (blob: Blob) => {
     setStage('analysis');
@@ -216,6 +290,11 @@ const MockTest: React.FC<MockTestProps> = ({ onComplete, onCancel, profile }) =>
                       <h3 className="text-white text-3xl font-black italic">{selectedExaminer.name}</h3>
                       <p className="text-white/40 text-sm font-bold leading-relaxed">"{currentQuestionText}"</p>
                    </div>
+                   {agentContext.isSpeaking && ttsAudioBlob && (
+                     <div className="absolute bottom-20 w-full max-w-md px-8">
+                       <WaveformCanvas mode="static" audioBlob={ttsAudioBlob} className="w-full h-20 rounded-2xl border border-emerald-500/20" />
+                     </div>
+                   )}
                    {agentContext.isSpeaking && (
                      <div className="absolute bottom-12 flex gap-1 items-center">
                         {[1,2,3,4].map(i => <div key={i} className="w-1 bg-emerald-500 animate-bounce" style={{height: `${Math.random()*20+10}px`, animationDelay: `${i*0.1}s`}} />)}
@@ -227,6 +306,13 @@ const MockTest: React.FC<MockTestProps> = ({ onComplete, onCancel, profile }) =>
                    <video ref={videoRef} autoPlay muted playsInline className="w-full h-full object-cover opacity-60" />
                    <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent pointer-events-none" />
                    <div className="absolute bottom-12 left-1/2 -translate-x-1/2 flex flex-col items-center gap-6 w-full px-12">
+                      <div className="w-full max-w-md">
+                         {isRecording && recordingStream ? (
+                           <WaveformCanvas mode="live" stream={recordingStream} className="w-full h-24 rounded-2xl border border-red-500/30" />
+                         ) : recordedAudioBlob ? (
+                           <WaveformCanvas mode="static" audioBlob={recordedAudioBlob} className="w-full h-24 rounded-2xl border border-white/20" />
+                         ) : null}
+                      </div>
                       <div className="flex gap-4">
                          {isRecording ? (
                             <button onClick={stopRecording} className="w-20 h-20 bg-red-600 rounded-full flex items-center justify-center text-3xl shadow-[0_0_30px_rgba(220,38,38,0.5)] animate-pulse">⏹️</button>
