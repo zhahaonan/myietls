@@ -127,9 +127,14 @@ step3() {
   ok "/v1/audio/speech exists (GET returned $code; 405 is fine)"
 
   # Frontend should not contain obvious keys (basic hygiene checks)
-  grep_must_not "DASHSCOPE_API_KEY" "."
-  grep_must_not "dashscope.*api.*key" "."
-  grep_must_not "sk-" "."
+ # Only check frontend files for secrets
+grep_must_not "DASHSCOPE_API_KEY" "./components"
+grep_must_not "DASHSCOPE_API_KEY" "./engine"
+grep_must_not "dashscope.*api.*key" "./components"
+grep_must_not "dashscope.*api.*key" "./engine"
+grep_must_not "sk-" "./components"
+grep_must_not "sk-" "./engine"
+
 
   ok "step3 done (Note: actual audio content check requires DASHSCOPE_API_KEY and POST success)."
 }
