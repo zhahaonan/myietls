@@ -77,14 +77,22 @@ const WaveformCanvas: React.FC<WaveformCanvasProps> = (props) => {
 
     const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
     const audioCtx = new AudioCtx();
+    if (audioCtx.state === 'suspended') {
+      audioCtx.resume().catch(() => undefined);
+    }
     const analyser = audioCtx.createAnalyser();
     analyser.fftSize = 2048;
-    analyser.smoothingTimeConstant = 0.85;
+    analyser.smoothingTimeConstant = 0.65;
     const source = audioCtx.createMediaStreamSource(props.stream);
+    const silentGain = audioCtx.createGain();
+    silentGain.gain.value = 0;
     source.connect(analyser);
+    analyser.connect(silentGain);
+    silentGain.connect(audioCtx.destination);
 
     const buffer = new Uint8Array(analyser.fftSize);
     let rafId = 0;
+    let smoothedPeak = 0.02;
 
     const tick = () => {
       const state = ensureCanvasSize();
@@ -93,6 +101,14 @@ const WaveformCanvas: React.FC<WaveformCanvasProps> = (props) => {
       drawBackdrop(ctx, width, height);
       analyser.getByteTimeDomainData(buffer);
 
+      let peak = 0;
+      for (let i = 0; i < buffer.length; i++) {
+        const amplitude = Math.abs(buffer[i] / 128 - 1);
+        if (amplitude > peak) peak = amplitude;
+      }
+      smoothedPeak = smoothedPeak * 0.85 + peak * 0.15;
+      const dynamicGain = Math.min(5, Math.max(1, 0.28 / Math.max(smoothedPeak, 0.01)));
+
       ctx.strokeStyle = WAVE;
       ctx.lineWidth = 2;
       ctx.beginPath();
@@ -100,7 +116,7 @@ const WaveformCanvas: React.FC<WaveformCanvasProps> = (props) => {
       let x = 0;
       for (let i = 0; i < buffer.length; i++) {
         const value = buffer[i] / 128 - 1;
-        const y = height / 2 + value * height * 0.35;
+        const y = height / 2 + value * height * 0.38 * dynamicGain;
         if (i === 0) ctx.moveTo(x, y);
         else ctx.lineTo(x, y);
         x += sliceWidth;
@@ -115,6 +131,7 @@ const WaveformCanvas: React.FC<WaveformCanvasProps> = (props) => {
       window.cancelAnimationFrame(rafId);
       source.disconnect();
       analyser.disconnect();
+      silentGain.disconnect();
       audioCtx.close().catch(() => undefined);
     };
   }, [props.mode, props.mode === 'live' ? props.stream : null]);

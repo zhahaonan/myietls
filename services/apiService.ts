@@ -1,6 +1,8 @@
 import { TTSProvider } from "../engine/TTSProvider";
 
 const tts = TTSProvider.getInstance();
+// 使用相对路径，在开发环境通过Vite proxy代理，在生产环境（魔搭）前后端同源
+const API_BASE = "";
 
 export const speakWithAliyun = (text: string, voice?: string) => tts.speak(text, voice);
 
@@ -27,7 +29,7 @@ export const callIELTSAgent = async (audioBlob: Blob, part: string, question: st
     formData.append("question", question);
     formData.append("level", userLevel);
 
-    const response = await fetch("http://localhost:8000/v1/ielts/evaluate", {
+    const response = await fetch(`${API_BASE}/v1/ielts/evaluate`, {
       method: "POST",
       body: formData,
     });
@@ -53,9 +55,40 @@ export const callIELTSAgent = async (audioBlob: Blob, part: string, question: st
     return {
       transcription: "Transmission lost.",
       scores: { fluency: 0, lexical: 0, grammar: 0, pronunciation: 0 },
-      agent_thoughts: ["Connection lost to http://localhost:8000"],
+      agent_thoughts: [`Connection lost to ${API_BASE}`],
       feedback: "The examiner has disconnected. Please verify your backend server is active.",
       xpReward: 0,
     };
   }
+};
+
+interface P1AnswerRequest {
+  question: string;
+  band: string;
+  profile: Record<string, unknown>;
+}
+
+export const generateP1Answer = async (payload: P1AnswerRequest): Promise<string> => {
+  const response = await fetch(`${API_BASE}/v1/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "myielts-multi-agent",
+      messages: [{ role: "user", content: payload.question }],
+      metadata: {
+        task: "p1_answer",
+        band: payload.band,
+        question: payload.question,
+        profile: payload.profile,
+      },
+    }),
+  });
+
+  if (!response.ok) {
+    const errorJson = await response.json().catch(() => ({}));
+    throw new Error(errorJson.detail || "Failed to generate Part 1 answer.");
+  }
+
+  const data = await response.json();
+  return data?.choices?.[0]?.message?.content || "";
 };

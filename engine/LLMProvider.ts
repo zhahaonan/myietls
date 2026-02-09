@@ -5,10 +5,10 @@ export type AgentPersona = 'EXAMINER' | 'CRITIC' | 'GM';
 
 const OFFICIAL_IELTS_RUBRIC = `
 OFFICIAL IELTS BAND DESCRIPTORS:
-- FC (Fluency): 9 (Effortless), 7 (Cohesive but hesitates), 5 (Fragmented).
-- LR (Lexical): 9 (Nuanced), 7 (Idiomatic), 5 (Basic).
-- GRA (Grammar): 9 (Full range), 7 (Complex mix), 5 (Limited).
-- PR (Pronunciation): 9 (Nuanced), 7 (Clear), 5 (Frequent errors).
+- FC (Fluency 流利度): 9 (Effortless 轻松自如), 7 (Cohesive but hesitates 连贯但有停顿), 5 (Fragmented 支离破碎).
+- LR (Lexical 词汇): 9 (Nuanced 细致入微), 7 (Idiomatic 地道习语), 5 (Basic 基础词汇).
+- GRA (Grammar 语法): 9 (Full range 全面掌握), 7 (Complex mix 复杂句式混用), 5 (Limited 有限句型).
+- PR (Pronunciation 发音): 9 (Nuanced 细致入微), 7 (Clear 清晰), 5 (Frequent errors 频繁错误).
 `;
 
 export class LLMProvider {
@@ -22,15 +22,15 @@ export class LLMProvider {
   private getSystemInstruction(persona: AgentPersona): string {
     switch (persona) {
       case 'EXAMINER':
-        return `You are a Senior IELTS Examiner. ${OFFICIAL_IELTS_RUBRIC}. 
-        You synthesize RAG context and Critic reasoning to provide final band scores and a professional report.`;
+        return `你是一名资深雅思考官。${OFFICIAL_IELTS_RUBRIC}. 
+        你需要综合 RAG 上下文和评论家的推理，提供最终的 Band 分数和专业的报告。`;
       case 'CRITIC':
-        return `You are a Linguistic Expert specialized in Agentic RAG. 
-        Your task is to analyze user input against retrieved band descriptors and search for idiomatic "Upgrades" to basic speech.`;
+        return `你是一名专注于 Agentic RAG 的语言专家。
+        你的任务是根据检索到的评分标准分析用户的输入，并寻找将基础口语升级为地道表达的"升级点"。`;
       case 'GM':
-        return `You are the Game Master. You translate scores into XP, gold, and "vibe" commentary.`;
+        return `你是游戏管理员 (Game Master)。你需要将分数转化为 XP (经验值)、金币和"氛围感"点评。`;
       default:
-        return "You are an IELTS coaching agent.";
+        return "你是一名雅思辅导智能体。";
     }
   }
 

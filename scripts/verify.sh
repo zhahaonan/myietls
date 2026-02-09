@@ -5,7 +5,7 @@ STEP="${1:-}"
 
 # ---- Config (edit these if ports change) ----
 API_BASE="http://localhost:8000"
-FRONT_BASE="http://localhost:5173"
+FRONT_BASE="http://localhost:3000"
 TIMEOUT_SEC="3"
 
 # ---- Helpers ----
@@ -172,6 +172,93 @@ step5() {
   ok "step5 done"
 }
 
+step6() {
+  local json_path="backend/data/processed/p1_bank.json"
+  [[ -f "$json_path" ]] || fail "$json_path not found."
+  ok "$json_path exists"
+
+  local py
+  if command -v python3 >/dev/null 2>&1; then
+    py="python3"
+  elif command -v python >/dev/null 2>&1; then
+    py="python"
+  else
+    fail "Missing required command: python3 (or python)"
+  fi
+
+  "$py" - "$json_path" <<'PY' || exit 1
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+except Exception as exc:
+    print(f"❌ invalid JSON: {exc}")
+    raise SystemExit(1)
+
+if not isinstance(data, list):
+    print("❌ top-level JSON must be an array")
+    raise SystemExit(1)
+
+if len(data) < 50:
+    print(f"❌ record count is {len(data)}, expected >= 50")
+    raise SystemExit(1)
+
+for i, rec in enumerate(data):
+    if not isinstance(rec, dict):
+        print(f"❌ record {i} is not an object")
+        raise SystemExit(1)
+    q = rec.get("question")
+    ans = rec.get("sample_answers")
+    if not isinstance(q, str) or not q.strip():
+        print(f"❌ record {i} missing non-empty question")
+        raise SystemExit(1)
+    if not isinstance(ans, list) or not ans:
+        print(f"❌ record {i} missing non-empty sample_answers")
+        raise SystemExit(1)
+    if not all(isinstance(x, str) and x.strip() for x in ans):
+        print(f"❌ record {i} has invalid sample_answers entries")
+        raise SystemExit(1)
+
+print(f"✅ JSON valid with {len(data)} records and required fields")
+PY
+
+  ok "step6 done"
+}
+
+step7() {
+  check_backend_running
+
+  local json_path="backend/data/processed/p1_bank.json"
+  [[ -f "$json_path" ]] || fail "$json_path not found."
+  ok "$json_path exists"
+
+  [[ -f "backend/engine/p1_retrieval.py" ]] || fail "backend/engine/p1_retrieval.py not found."
+  ok "backend/engine/p1_retrieval.py exists"
+
+  grep_must_have "def retrieve_examples" "backend/engine/p1_retrieval.py"
+
+  local resp
+  resp="$(curl_json "$API_BASE/v1/chat/completions" '{
+    "model":"test",
+    "messages":[{"role":"user","content":"Generate Part1 answer"}],
+    "metadata":{
+      "task":"p1_answer",
+      "band":"6.5",
+      "question":"Do you like your hometown?",
+      "profile":{"identity":"student","hobbies":["music"],"city":"Shanghai","topic":"hometown"}
+    }
+  }')"
+
+  echo "$resp" | grep -q '"choices"' || fail "Response missing 'choices'"
+  echo "$resp" | grep -q '"content"' || fail "Response missing 'content'"
+  ok "p1_answer returns content"
+
+  ok "step7 done"
+}
+
 # ---- Router ----
 case "$STEP" in
   step0) step0 ;;
@@ -180,8 +267,10 @@ case "$STEP" in
   step3) step3 ;;
   step4) step4 ;;
   step5) step5 ;;
+  step6) step6 ;;
+  step7) step7 ;;
   *)
-    echo "Usage: $0 step0|step1|step2|step3|step4|step5"
+    echo "Usage: $0 step0|step1|step2|step3|step4|step5|step6|step7"
     exit 2
     ;;
 esac

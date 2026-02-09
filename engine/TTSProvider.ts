@@ -1,7 +1,7 @@
 
 export class TTSProvider {
   private static instance: TTSProvider;
-  private apiBase: string = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+  private apiBase: string = "";
   private model: string = "qwen3-tts-instruct-flash-realtime-2026-01-22";
 
   private constructor() {}

@@ -1,6 +1,5 @@
 
 import React, { useState, useEffect, useRef } from 'react';
-import { GoogleGenAI, Type } from '@google/genai';
 import { INITIAL_QUESTIONS, MATERIAL_ARCHETYPES } from '../constants';
 import { PracticeQuestion, UserProfile, MaterialArchetype, GoldenPhrase } from '../types';
 import { callIELTSAgent, speakWithAliyun } from '../services/apiService';
@@ -48,6 +47,8 @@ const PracticeBank: React.FC<PracticeBankProps> = ({ profile, setProfile, onNewA
     setIsChallengeActive(false);
     setFeedbackTokens([]);
     setAgentThoughts([]);
+    // Default P1 to text (examples) mode
+    if (activeTab === 'P1') setInputMode('text');
   }, [activeTab]);
 
   const speak = async (text: string) => {
@@ -83,57 +84,22 @@ const PracticeBank: React.FC<PracticeBankProps> = ({ profile, setProfile, onNewA
     
     setIsPolishing(true);
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       const context = selectedArchetype ? `Archetype: ${selectedArchetype.title}` : `Question: ${selectedQuestion?.questionEn}`;
-      
-      const prompt = `Student Level: ${profile.currentLevel}, Target Band: ${profile.targetScore}.
-      Type: Part ${activeTab}. 
-      ${context}
-      Student Draft: "${draftToUse}".
-      
-      Task: 
-      1. Refine the draft into a Band 8.5 response.
-      2. Return JSON { "en": "...", "cn": "...", "imagePrompt": "A detailed pixel art illustration of [describe key scene from the refined English text] in a vibrant, 16-bit gaming style." }`;
+      const isDirectExample = activeTab === 'P1' && inputMode === 'text';
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3-flash-preview',
-        contents: prompt,
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              en: { type: Type.STRING },
-              cn: { type: Type.STRING },
-              imagePrompt: { type: Type.STRING }
-            },
-            required: ['en', 'cn', 'imagePrompt']
-          }
-        }
+      const resp = await fetch('/api/polish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          draft: draftToUse,
+          context,
+          studentLevel: profile.currentLevel,
+          targetBand: parseFloat(profile.targetScore) || 6.5,
+          part: activeTab,
+          isDirectExample,
+        }),
       });
-
-      const result = JSON.parse(response.text);
-      
-      setIsGeneratingImage(true);
-      let visualUrl = '';
-      try {
-        const imgResponse = await ai.models.generateContent({
-          model: 'gemini-2.5-flash-image',
-          contents: { parts: [{ text: result.imagePrompt }] },
-          config: { imageConfig: { aspectRatio: "1:1" } }
-        });
-        
-        for (const part of imgResponse.candidates?.[0].content.parts || []) {
-          if (part.inlineData) {
-            visualUrl = `data:image/png;base64,${part.inlineData.data}`;
-            break;
-          }
-        }
-      } catch (err) {
-        console.error("Image gen failed", err);
-      } finally {
-        setIsGeneratingImage(false);
-      }
+      const result = await resp.json();
 
       const polishedQ: PracticeQuestion = {
         id: Math.random().toString(),
@@ -141,13 +107,13 @@ const PracticeBank: React.FC<PracticeBankProps> = ({ profile, setProfile, onNewA
         topic: selectedArchetype?.title || selectedQuestion?.topic || 'Practice',
         question: selectedArchetype ? `万能素材: ${selectedArchetype.title}` : (selectedQuestion?.question || ''),
         questionEn: selectedQuestion?.questionEn || '',
-        answerEn: result.en,
-        answerCn: result.cn,
+        answerEn: result.en || draftToUse,
+        answerCn: result.cn || '',
         phrases: [],
         customized: true,
         xpValue: activeTab === 'P3' ? 400 : 200,
         p1Type: selectedQuestion?.p1Type,
-        visualUrl
+        visualUrl: ''
       };
       
       setSelectedQuestion(polishedQ);
@@ -164,30 +130,18 @@ const PracticeBank: React.FC<PracticeBankProps> = ({ profile, setProfile, onNewA
     if (selectedPhrases.find(p => p.phrase.toLowerCase() === word.toLowerCase())) return;
 
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-      const resp = await ai.models.generateContent({
-        model: 'gemini-3-flash-preview',
-        contents: `Translate the English word/phrase "${word}" to Chinese contextually as used in IELTS. Also provide 1 relevant emoji. Return JSON { "translation": "...", "emoji": "..." }`,
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              translation: { type: Type.STRING },
-              emoji: { type: Type.STRING }
-            },
-            required: ["translation", "emoji"]
-          }
-        }
+      const resp = await fetch('/api/translate_word', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ word }),
       });
-      const res = JSON.parse(resp.text);
-      setSelectedPhrases(prev => [...prev, { phrase: word, translation: res.translation, emoji: res.emoji }]);
+      const res = await resp.json();
+      setSelectedPhrases(prev => [...prev, { phrase: word, translation: res.translation, emoji: res.emoji || '📝' }]);
     } catch (e) {
       console.error(e);
     }
   };
 
-  // Fix: Added missing renderPolishedTextWithDiscovery function
   const renderPolishedTextWithDiscovery = () => {
     if (!selectedQuestion) return null;
     const words = selectedQuestion.answerEn.split(/\s+/);
@@ -292,6 +246,27 @@ const PracticeBank: React.FC<PracticeBankProps> = ({ profile, setProfile, onNewA
       console.error("Evaluation failed", err);
       setIsAnalyzing(false);
     }
+  };
+
+  const getP1Examples = () => {
+    if (!selectedQuestion) return [];
+    return [
+      { 
+        label: "🌟 满分地道范本", 
+        text: selectedQuestion.answerEn, 
+        desc: "使用高频衔接词和精准词汇，最稳妥的选择。" 
+      },
+      { 
+        label: "🎨 扩展细节范本", 
+        text: `${selectedQuestion.answerEn} Moreover, I believe it plays a crucial role in my daily routine as it provides me with a sense of fulfillment.`, 
+        desc: "增加个人观点和频率副词，展示流利度。" 
+      },
+      { 
+        label: "⚡ 简洁干练范本", 
+        text: `To be honest, ${selectedQuestion.answerEn.split(',')[0]}. It's quite simple but meaningful to me.`, 
+        desc: "适合口语基础一般，追求准确性的同学。" 
+      }
+    ];
   };
 
   const renderTechniqueContent = () => {
@@ -419,6 +394,12 @@ const PracticeBank: React.FC<PracticeBankProps> = ({ profile, setProfile, onNewA
         </div>
       ) : currentStep === 'polish' ? (
         <div className="max-w-4xl mx-auto game-card bg-white p-12 rounded-[50px] animate-in zoom-in">
+           {isPolishing && (
+              <div className="absolute inset-0 z-50 bg-white/80 backdrop-blur-md rounded-[50px] flex flex-col items-center justify-center space-y-4">
+                 <div className="text-5xl animate-spin">💠</div>
+                 <p className="text-xl font-black text-[#1a2e1a] uppercase italic tracking-widest">准备视觉试炼中...</p>
+              </div>
+           )}
            <div className="mb-10 text-center">
               <h3 className="text-3xl font-black text-[#1a2e1a] mb-2">
                 {selectedArchetype ? `万能素材：${selectedArchetype.title}` : (selectedQuestion?.question || '写下你的想法')}
@@ -426,24 +407,62 @@ const PracticeBank: React.FC<PracticeBankProps> = ({ profile, setProfile, onNewA
            </div>
            <div className="space-y-6">
               <div className="flex gap-4">
-                <button onClick={() => setInputMode('text')} className={`flex-1 py-4 rounded-2xl border-4 font-black text-xs uppercase ${inputMode === 'text' ? 'bg-[#1a2e1a] text-white' : 'bg-white text-slate-400'}`}>打字录入</button>
+                <button onClick={() => setInputMode('text')} className={`flex-1 py-4 rounded-2xl border-4 font-black text-xs uppercase ${inputMode === 'text' ? 'bg-[#1a2e1a] text-white' : 'bg-white text-slate-400'}`}>
+                  {activeTab === 'P1' ? '💡 答案范例' : '打字录入'}
+                </button>
                 <button onClick={() => setInputMode('voice')} className={`flex-1 py-4 rounded-2xl border-4 font-black text-xs uppercase ${inputMode === 'voice' ? 'bg-indigo-600 text-white' : 'bg-white text-slate-400'}`}>语音录入</button>
               </div>
+              
               <div className="relative">
-                <textarea value={userDraft} onChange={(e) => setUserDraft(e.target.value)} className="w-full h-48 p-8 rounded-[32px] border-4 border-dashed border-[#1a2e1a] bg-slate-50 focus:ring-0 outline-none text-xl font-bold" placeholder="请输入您的原始构想..." />
-                {inputMode === 'voice' && (
-                  <div className="absolute inset-0 bg-indigo-50/90 backdrop-blur-sm rounded-[32px] flex flex-col items-center justify-center">
-                    {isRecording ? (
-                      <button onClick={stopVoiceCaptureAndPolish} className="px-12 py-4 bg-red-500 text-white rounded-2xl font-black uppercase text-xs animate-pulse">🔴 停止录制</button>
-                    ) : (
-                      <button onClick={startVoiceCapture} className="w-24 h-24 bg-indigo-600 text-white rounded-full flex items-center justify-center text-5xl hover:scale-105 active:translate-y-1">🎙️</button>
-                    )}
+                {activeTab === 'P1' && inputMode === 'text' ? (
+                  <div className="space-y-4">
+                    <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">点击直接采用以下范例开始复述试炼：</div>
+                    <div className="grid grid-cols-1 gap-4">
+                      {getP1Examples().map((ex, idx) => (
+                        <button 
+                          key={idx} 
+                          onClick={() => {
+                            setUserDraft(ex.text);
+                            polishMaterial(ex.text); // Directly proceed to Review
+                          }}
+                          className={`w-full p-6 text-left rounded-3xl border-4 border-slate-100 bg-slate-50 hover:border-emerald-500 hover:bg-emerald-50 transition-all hover:-translate-y-1 shadow-sm hover:shadow-md group`}
+                        >
+                          <div className="flex justify-between items-center mb-2">
+                            <span className="font-black text-sm text-[#1a2e1a] group-hover:text-emerald-700">{ex.label}</span>
+                            <span className="opacity-0 group-hover:opacity-100 transition-opacity">⚡ 立即采用</span>
+                          </div>
+                          <p className="text-sm font-bold text-slate-600 mb-2 italic">"{ex.text}"</p>
+                          <p className="text-[10px] text-slate-400 font-bold">{ex.desc}</p>
+                        </button>
+                      ))}
+                    </div>
                   </div>
+                ) : (
+                  <>
+                    <textarea 
+                      value={userDraft} 
+                      onChange={(e) => setUserDraft(e.target.value)} 
+                      className="w-full h-48 p-8 rounded-[32px] border-4 border-dashed border-[#1a2e1a] bg-slate-50 focus:ring-0 outline-none text-xl font-bold" 
+                      placeholder={inputMode === 'voice' ? "正在等待语音..." : "请输入您的原始构想..."} 
+                    />
+                    {inputMode === 'voice' && (
+                      <div className="absolute inset-0 bg-indigo-50/90 backdrop-blur-sm rounded-[32px] flex flex-col items-center justify-center">
+                        {isRecording ? (
+                          <button onClick={stopVoiceCaptureAndPolish} className="px-12 py-4 bg-red-500 text-white rounded-2xl font-black uppercase text-xs animate-pulse">🔴 停止录制</button>
+                        ) : (
+                          <button onClick={startVoiceCapture} className="w-24 h-24 bg-indigo-600 text-white rounded-full flex items-center justify-center text-5xl hover:scale-105 active:translate-y-1">🎙️</button>
+                        )}
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
-              <button onClick={() => polishMaterial()} disabled={isPolishing || (!userDraft && inputMode === 'text')} className="w-full py-8 bg-emerald-600 text-white rounded-[32px] font-black text-3xl uppercase game-btn disabled:opacity-50">
-                {isPolishing ? '✨ 正在链接 RAG 语料库...' : '生成高分范例'}
-              </button>
+              
+              {!(activeTab === 'P1' && inputMode === 'text') && (
+                <button onClick={() => polishMaterial()} disabled={isPolishing || (!userDraft)} className="w-full py-8 bg-emerald-600 text-white rounded-[32px] font-black text-3xl uppercase game-btn disabled:opacity-50">
+                  {isPolishing ? '✨ 正在生成高分范例...' : '生成高分范例'}
+                </button>
+              )}
            </div>
         </div>
       ) : selectedQuestion && (
@@ -451,6 +470,9 @@ const PracticeBank: React.FC<PracticeBankProps> = ({ profile, setProfile, onNewA
            <div className="game-card bg-white p-12 rounded-[50px]">
               <div className="flex justify-between items-center mb-10">
                  <h3 className="text-3xl font-black text-[#1a2e1a]">{isChallengeActive ? '🎯 视觉复述试炼' : '🏷️ 自选核心表达'}</h3>
+                 {!isChallengeActive && (
+                   <button onClick={() => setCurrentStep('polish')} className="text-xs font-black text-slate-400 uppercase tracking-widest hover:text-red-500">重新构思</button>
+                 )}
               </div>
 
               {!isChallengeActive ? (
@@ -465,7 +487,7 @@ const PracticeBank: React.FC<PracticeBankProps> = ({ profile, setProfile, onNewA
                       </div>
                    </div>
                    <div className="bg-emerald-50 p-8 rounded-[40px] border-4 border-dashed border-emerald-400 min-h-[100px]">
-                      <h4 className="text-[10px] font-black text-emerald-600 uppercase mb-4 tracking-widest">点击上方单词提取锚点：</h4>
+                      <h4 className="text-[10px] font-black text-emerald-600 uppercase mb-4 tracking-widest">点击上方单词提取锚点 (提取越多，挑战积分越高)：</h4>
                       <div className="flex flex-wrap gap-4">
                          {selectedPhrases.map((sp, i) => (
                            <div key={i} className="px-5 py-3 bg-white border-2 border-emerald-500 rounded-2xl font-black text-emerald-800 flex items-center gap-3 animate-in zoom-in">

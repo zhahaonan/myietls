@@ -6,9 +6,20 @@ import os
 import time
 import json
 import re
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Load environment variables
+# 1. Try .env.local in the root directory (for unified config)
+root_dir = Path(__file__).resolve().parent.parent
+load_dotenv(root_dir / ".env.local")
+# 2. Try .env in the current directory (standard behavior)
+load_dotenv()
+
 from engine.camel_agents import CamelIELTSAgent
 from engine.rag import AgenticRAG
 from engine import openai_client
+from engine.p1_service import ALLOWED_BANDS, generate_p1_answer
 from engine.tts import synthesize_speech
 
 app = FastAPI(title="MyIELTS Multi-Agent OpenAI-Style API")
@@ -138,15 +149,34 @@ async def chat_completions(payload: ChatCompletionRequest):
     Standard OpenAI-style JSON chat endpoint backed by an OpenAI-compatible model.
     """
     last_user_message = _get_last_user_message(payload.messages)
+    metadata = payload.metadata or {}
 
-    try:
-        content = openai_client.chat(
-            messages=[{"role": m.role, "content": m.content} for m in payload.messages]
-        )
-    except RuntimeError as exc:
-        error_code = _extract_error_code(exc)
-        fallback = last_user_message or "Sorry, I cannot answer that right now."
-        content = f"LLM unavailable: {error_code}\nFallback: {fallback}"
+    if metadata.get("task") == "p1_answer":
+        band = str(metadata.get("band", "")).strip()
+        if band not in ALLOWED_BANDS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid band '{band}'. Allowed bands: {sorted(ALLOWED_BANDS)}",
+            )
+
+        question = str(metadata.get("question") or last_user_message).strip()
+        if not question:
+            raise HTTPException(status_code=400, detail="Missing metadata.question for p1_answer.")
+
+        profile = metadata.get("profile")
+        if not isinstance(profile, dict):
+            profile = {}
+
+        content = generate_p1_answer(question=question, band=band, profile=profile)
+    else:
+        try:
+            content = openai_client.chat(
+                messages=[{"role": m.role, "content": m.content} for m in payload.messages]
+            )
+        except RuntimeError as exc:
+            error_code = _extract_error_code(exc)
+            fallback = last_user_message or "Sorry, I cannot answer that right now."
+            content = f"LLM unavailable: {error_code}\nFallback: {fallback}"
 
     return {
         "id": f"chatcmpl-{int(time.time())}",
@@ -194,6 +224,66 @@ async def audio_speech(payload: SpeechRequest):
 async def get_bank():
     """Retrieve pre-loaded IELTS question bank."""
     return rag_module.get_question_context("all")
+
+
+class PolishRequest(BaseModel):
+    draft: str
+    context: str = ""
+    studentLevel: str = "6.0-6.5"
+    targetBand: float = 6.5
+    part: str = "P1"
+    isDirectExample: bool = False
+
+
+class TranslateWordRequest(BaseModel):
+    word: str
+
+
+@app.post("/api/polish")
+async def polish_draft(req: PolishRequest):
+    """Polish a draft answer using the LLM, return English + Chinese + imagePrompt."""
+    prompt = f"""Student Level: {req.studentLevel}, Target Band: {req.targetBand}.
+Type: Part {req.part}.
+{req.context}
+Draft: "{req.draft}".
+
+Task:
+1. {"Keep this text exactly as provided (do not refine it)." if req.isDirectExample else "Refine the draft into a Band 8.5 response."}
+2. Translate the English text to Chinese.
+3. Create a short image description for the scene.
+4. Return JSON with keys: en, cn, imagePrompt"""
+
+    try:
+        raw = openai_client.chat(
+            messages=[
+                {"role": "system", "content": "You are an IELTS speaking coach. Always respond with valid JSON containing keys: en, cn, imagePrompt."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.7,
+        )
+        result = json.loads(raw)
+        return {"en": result.get("en", req.draft), "cn": result.get("cn", ""), "imagePrompt": result.get("imagePrompt", "")}
+    except (json.JSONDecodeError, RuntimeError):
+        return {"en": req.draft, "cn": "(翻译暂不可用)", "imagePrompt": ""}
+
+
+@app.post("/api/translate_word")
+async def translate_word(req: TranslateWordRequest):
+    """Translate an English word/phrase to Chinese with an emoji."""
+    prompt = f'Translate the English word/phrase "{req.word}" to Chinese contextually as used in IELTS. Also provide 1 relevant emoji. Return JSON {{ "translation": "...", "emoji": "..." }}'
+
+    try:
+        raw = openai_client.chat(
+            messages=[
+                {"role": "system", "content": "Always respond with valid JSON containing keys: translation, emoji."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.3,
+        )
+        result = json.loads(raw)
+        return {"translation": result.get("translation", ""), "emoji": result.get("emoji", "")}
+    except (json.JSONDecodeError, RuntimeError):
+        return {"translation": req.word, "emoji": "📝"}
 
 if __name__ == "__main__":
     import uvicorn

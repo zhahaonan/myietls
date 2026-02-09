@@ -38,15 +38,24 @@ const ProfileSetup: React.FC<ProfileSetupProps> = ({ onSave }) => {
     {
       dialogue: "你好！我是洛尔(Lorekeeper)，这片试炼之地的守护者。在对抗表达迷雾前，先写下你在卷轴上的名字吧？",
       content: (
-        <input
-          autoFocus
-          type="text"
-          className="w-full px-6 py-4 rounded-2xl border-4 border-[#1a2e1a] focus:ring-0 outline-none text-2xl font-bold bg-white"
-          placeholder="你的名字..."
-          value={profile.name}
-          onChange={(e) => setProfile({ ...profile, name: e.target.value })}
-          onKeyDown={(e) => e.key === 'Enter' && profile.name && next()}
-        />
+        <div className="space-y-4">
+          <input
+            autoFocus
+            type="text"
+            className="w-full px-6 py-4 rounded-2xl border-4 border-[#1a2e1a] focus:ring-0 outline-none text-2xl font-bold bg-white"
+            placeholder="你的名字..."
+            value={profile.name}
+            onChange={(e) => setProfile({ ...profile, name: e.target.value })}
+            onKeyDown={(e) => e.key === 'Enter' && profile.name && next()}
+          />
+          <button
+            onClick={() => profile.name && next()}
+            disabled={!profile.name}
+            className="w-full py-4 bg-[#1a2e1a] text-white rounded-2xl font-black text-lg game-btn disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            确认 →
+          </button>
+        </div>
       )
     },
     {

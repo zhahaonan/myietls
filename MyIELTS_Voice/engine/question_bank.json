@@ -1,0 +1,31 @@
+
+{
+  "part1": [
+    {
+      "id": "p1_work",
+      "topic": "Work or Study",
+      "questions": [
+        "What work do you do?",
+        "Why did you choose that kind of work?",
+        "Do you miss being a student?"
+      ]
+    }
+  ],
+  "part2": [
+    {
+      "id": "p2_person",
+      "topic": "A person you admire",
+      "cue_card": "Describe a person you admire who is older than you. You should say: who they are, how you know them, what they are like, and explain why you admire them."
+    }
+  ],
+  "part3": [
+    {
+      "id": "p3_society",
+      "topic": "Social Values",
+      "questions": [
+        "Which are more important, family values or community values?",
+        "How has technology changed the way we interact with our elders?"
+      ]
+    }
+  ]
+}
