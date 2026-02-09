@@ -212,11 +212,17 @@ async def ielts_evaluate(
     part: str = Form("P1"),
     question: str = Form(""),
     level: str = Form("6.0-6.5"),
+    anchor_words: str = Form("[]"),
 ):
     if not audio:
         raise HTTPException(status_code=400, detail="No audio file provided.")
     if camel_engine is None:
         raise HTTPException(status_code=503, detail="AI 引擎未初始化")
+
+    try:
+        words_list = json.loads(anchor_words)
+    except (json.JSONDecodeError, TypeError):
+        words_list = []
 
     try:
         audio_bytes = await audio.read()
@@ -225,6 +231,7 @@ async def ielts_evaluate(
             question=question,
             target_level=level,
             part=part,
+            anchor_words=words_list,
         )
         return {
             "id": f"chatcmpl-{int(time.time())}",
@@ -241,6 +248,7 @@ async def ielts_evaluate(
                         "scores": result["scores"],
                         "agent_thoughts": result["agent_thoughts"],
                         "xp_reward": result["xpReward"],
+                        "pronunciation_feedback": result.get("pronunciation_feedback", []),
                     },
                 },
                 "finish_reason": "stop",

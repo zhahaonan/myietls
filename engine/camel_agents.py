@@ -96,6 +96,51 @@ def _transcribe_audio(audio_bytes: bytes) -> str:
     return "(语音转写超时)"
 
 
+def _analyze_pronunciation(transcription: str, anchor_words: List[str]) -> List[Dict[str, Any]]:
+    """Use LLM to compare STT transcription against anchor words for pronunciation feedback."""
+    if not anchor_words:
+        return []
+
+    words_str = ", ".join(anchor_words)
+    prompt = (
+        f"You are a pronunciation analysis expert.\n"
+        f"The student was supposed to use these anchor words: [{words_str}]\n"
+        f"The speech-to-text system transcribed their speech as:\n\"{transcription}\"\n\n"
+        f"For EACH anchor word, determine:\n"
+        f"1. \"correct\" - the word appears correctly in the transcription (allow minor punctuation/case differences)\n"
+        f"2. \"mispronounced\" - a phonetically similar but wrong form appears (e.g. routine→root teen, fulfillment→fulfill meant)\n"
+        f"3. \"missing\" - the word was not said at all\n\n"
+        f"Return ONLY a JSON array. Each element:\n"
+        f'{{"word":"<anchor>","status":"correct|mispronounced|missing","recognized_as":"<what STT heard or null>","ipa":"/<IPA of correct pronunciation>/","hint":"<short Chinese tip, max 15 chars>"}}\n'
+        f"For correct words, ipa and hint can be empty strings. recognized_as should be null for correct and missing."
+    )
+
+    try:
+        raw = llm_client.chat(
+            messages=[
+                {"role": "system", "content": "You are a pronunciation analysis expert. Return only valid JSON array, nothing else."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.2,
+        )
+        # Strip markdown fences if present
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```\w*\n?", "", cleaned)
+            cleaned = re.sub(r"\n?```$", "", cleaned)
+        return json.loads(cleaned)
+    except (json.JSONDecodeError, RuntimeError):
+        # Fallback: simple string matching, no IPA
+        result = []
+        lower_trans = transcription.lower()
+        for w in anchor_words:
+            if w.lower() in lower_trans:
+                result.append({"word": w, "status": "correct", "recognized_as": None, "ipa": "", "hint": ""})
+            else:
+                result.append({"word": w, "status": "missing", "recognized_as": None, "ipa": "", "hint": ""})
+        return result
+
+
 class CamelIELTSAgent:
     """
     Orchestrates a CAMEL-style Role-Playing interaction between AI Agents.
@@ -106,7 +151,8 @@ class CamelIELTSAgent:
         self.rag = AgenticRAG()
 
     async def run_roleplay_evaluation(
-        self, audio_bytes: bytes, question: str, target_level: str, part: str
+        self, audio_bytes: bytes, question: str, target_level: str, part: str,
+        anchor_words: List[str] = None,
     ):
         thoughts = []
 
@@ -116,6 +162,16 @@ class CamelIELTSAgent:
         thoughts.append(
             f"Agent: [AudioNode] 信号已锁定。内容: '{transcription[:60]}...'"
         )
+
+        # PHASE 0.5: Pronunciation Analysis (anchor words)
+        pronunciation_feedback = []
+        if anchor_words:
+            thoughts.append("Agent: [PronunciationCoach] 正在分析锚点词发音准确性...")
+            pronunciation_feedback = _analyze_pronunciation(transcription, anchor_words)
+            correct_count = sum(1 for p in pronunciation_feedback if p.get("status") == "correct")
+            thoughts.append(
+                f"Agent: [PronunciationCoach] 分析完成: {correct_count}/{len(anchor_words)} 个锚点词发音正确"
+            )
 
         # PHASE 1: Knowledge Retrieval (RAG)
         thoughts.append(
@@ -198,4 +254,5 @@ class CamelIELTSAgent:
             "agent_thoughts": thoughts,
             "feedback": f"{final_json.get('report')}\n\n语言升级建议:\n{critic_report}",
             "xpReward": final_json.get("xp", 100),
+            "pronunciation_feedback": pronunciation_feedback,
         }
