@@ -9,6 +9,8 @@ from engine.p1_service import ALLOWED_BANDS, generate_p1_answer
 from engine.tts import synthesize_speech
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 
 # Load environment variables
@@ -27,6 +29,19 @@ fastapi_app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 如果存在前端静态文件，提供静态文件服务
+static_dir = Path(__file__).parent / "dist"
+if static_dir.exists():
+    fastapi_app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+    
+    @fastapi_app.get("/")
+    async def serve_frontend():
+        return FileResponse(str(static_dir / "index.html"))
+    
+    @fastapi_app.get("/app")
+    async def serve_app():
+        return FileResponse(str(static_dir / "index.html"))
 API_KEY = os.getenv("API_KEY") or os.getenv("GEMINI_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY")
