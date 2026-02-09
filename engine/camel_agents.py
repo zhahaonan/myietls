@@ -3,26 +3,16 @@ import json
 import urllib.request
 import urllib.error
 from typing import List, Dict, Any
-from . import openai_client
+from . import llm_client
 from .rag import AgenticRAG
 
 
 def _transcribe_audio(audio_bytes: bytes) -> str:
-    """Transcribe audio using DashScope-compatible Whisper API, fallback to OPENAI_BASE_URL."""
-    dashscope_key = os.getenv("DASHSCOPE_API_KEY", "").strip()
-    if dashscope_key:
-        base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-        api_key = dashscope_key
-        model = "sensevoice-v1"
-    else:
-        base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-        api_key = os.getenv("OPENAI_API_KEY", "").strip()
-        model = "whisper-1"
-
+    """Transcribe audio using DashScope SenseVoice."""
+    api_key = os.getenv("DASHSCOPE_API_KEY", "").strip()
     if not api_key:
-        return "(语音转写不可用: 缺少 API 密钥)"
+        return "(语音转写不可用: 缺少 DASHSCOPE_API_KEY)"
 
-    # Build multipart form data
     boundary = "----FormBoundary7MA4YWxkTrZu0gW"
     body = b""
     body += f"--{boundary}\r\n".encode()
@@ -31,11 +21,11 @@ def _transcribe_audio(audio_bytes: bytes) -> str:
     body += audio_bytes
     body += f"\r\n--{boundary}\r\n".encode()
     body += b'Content-Disposition: form-data; name="model"\r\n\r\n'
-    body += f"{model}\r\n".encode()
+    body += b"sensevoice-v1\r\n"
     body += f"--{boundary}--\r\n".encode()
 
     req = urllib.request.Request(
-        url=f"{base_url}/audio/transcriptions",
+        url="https://dashscope.aliyuncs.com/compatible-mode/v1/audio/transcriptions",
         data=body,
         headers={
             "Content-Type": f"multipart/form-data; boundary={boundary}",
@@ -58,10 +48,10 @@ def _transcribe_audio(audio_bytes: bytes) -> str:
 class CamelIELTSAgent:
     """
     Orchestrates a CAMEL-style Role-Playing interaction between AI Agents.
-    Uses openai_client for LLM calls and DashScope SenseVoice for STT.
+    Uses DashScope Qwen for LLM and SenseVoice for STT.
     """
 
-    def __init__(self, api_key: str = None):
+    def __init__(self):
         self.rag = AgenticRAG()
 
     async def run_roleplay_evaluation(
@@ -85,7 +75,7 @@ class CamelIELTSAgent:
         # PHASE 2: Role-Playing Loop (CAMEL Style)
         # Agent A: The Examiner
         thoughts.append("Agent: [Examiner] 正在根据官方评分标准评估回答...")
-        initial_assessment = openai_client.chat(
+        initial_assessment = llm_client.chat(
             messages=[
                 {
                     "role": "system",
@@ -101,7 +91,7 @@ class CamelIELTSAgent:
 
         # Agent B: The Critic (Peer Review)
         thoughts.append("Agent: [Critic] 正在复审考官评估并提出升级建议...")
-        critic_report = openai_client.chat(
+        critic_report = llm_client.chat(
             messages=[
                 {
                     "role": "system",
@@ -117,7 +107,7 @@ class CamelIELTSAgent:
 
         # Agent C: The Game Master (Consolidation)
         thoughts.append("Agent: [GM] 正在合成最终 JSON 报告并计算游戏化奖励...")
-        gm_raw = openai_client.chat(
+        gm_raw = llm_client.chat(
             messages=[
                 {
                     "role": "system",

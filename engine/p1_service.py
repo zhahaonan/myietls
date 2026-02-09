@@ -1,6 +1,6 @@
 from typing import Any, Dict, List
 
-from engine import openai_client
+from engine import llm_client
 from engine.p1_retrieval import retrieve_examples
 
 ALLOWED_BANDS = {"5.5", "6", "6.5", "7", "7.5", "8"}
@@ -78,7 +78,7 @@ def generate_p1_answer(question: str, band: str, profile: Dict[str, Any]) -> str
     )
 
     try:
-        answer = openai_client.chat(
+        answer = llm_client.chat(
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
