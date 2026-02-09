@@ -8,7 +8,7 @@ RUN pip install --upgrade pip && \
     pip install -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn -r requirements.txt && \
     pip cache purge
 
-RUN useradd -m -u 1000 user && \
+RUN (useradd -m -u 1000 user || true) && \
     chown -R user:user /home/user/app
 USER user
 

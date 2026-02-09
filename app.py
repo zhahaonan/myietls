@@ -8,11 +8,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from engine.camel_agents import CamelIELTSAgent
-from engine.rag import AgenticRAG
-from engine import openai_client
-from engine.p1_service import ALLOWED_BANDS, generate_p1_answer
-from engine.tts import synthesize_speech
 
 
 # Load environment variables
@@ -37,18 +32,36 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY")
 
 
-# 延迟初始化AI引擎，避免在缺少API密钥时立即报错
+# 延迟初始化AI引擎，避免在缺少依赖或API密钥时崩溃
+camel_engine = None
+rag_module = None
+ALLOWED_BANDS = {"5.5", "6", "6.5", "7", "7.5", "8"}
+
 try:
+    from engine.camel_agents import CamelIELTSAgent
     camel_engine = CamelIELTSAgent(api_key=API_KEY)
 except Exception as e:
     print(f"警告: Camel代理初始化失败: {e}")
-    camel_engine = None
 
 try:
+    from engine.rag import AgenticRAG
     rag_module = AgenticRAG()
 except Exception as e:
     print(f"警告: RAG模块初始化失败: {e}")
-    rag_module = None
+
+try:
+    from engine.p1_service import ALLOWED_BANDS, generate_p1_answer
+except Exception as e:
+    print(f"警告: P1服务导入失败: {e}")
+    def generate_p1_answer(**kwargs):
+        return "服务暂不可用"
+
+try:
+    from engine.tts import synthesize_speech
+except Exception as e:
+    print(f"警告: TTS服务导入失败: {e}")
+    def synthesize_speech(**kwargs):
+        raise RuntimeError("TTS服务不可用")
 
 
 # 请求模型定义
