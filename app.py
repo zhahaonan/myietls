@@ -7,6 +7,8 @@ from engine.rag import AgenticRAG
 from engine import openai_client
 from engine.p1_service import ALLOWED_BANDS, generate_p1_answer
 from engine.tts import synthesize_speech
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 
 # Load environment variables
@@ -15,7 +17,17 @@ from dotenv import load_dotenv
 load_dotenv(root_dir / ".env.local")
 load_dotenv()
 
-# Initialize engines with environment variables
+# 初始化FastAPI应用以添加CORS支持
+fastapi_app = FastAPI()
+
+# 添加CORS中间件以支持前端访问
+fastapi_app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # 在生产环境中应该指定具体的域名
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 API_KEY = os.getenv("API_KEY") or os.getenv("GEMINI_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY")
