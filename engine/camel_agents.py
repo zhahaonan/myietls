@@ -1,48 +1,99 @@
 import os
+import re
 import json
+import time
+import base64
 import urllib.request
 import urllib.error
 from typing import List, Dict, Any
 from . import llm_client
 from .rag import AgenticRAG
 
+DASHSCOPE_ASR_URL = (
+    "https://dashscope.aliyuncs.com/api/v1/services/audio/asr/transcription"
+)
+DASHSCOPE_TASK_URL = "https://dashscope.aliyuncs.com/api/v1/tasks"
+
 
 def _transcribe_audio(audio_bytes: bytes) -> str:
-    """Transcribe audio using DashScope SenseVoice."""
+    """Transcribe audio using DashScope SenseVoice (async API with base64)."""
     api_key = os.getenv("DASHSCOPE_API_KEY", "").strip()
     if not api_key:
         return "(语音转写不可用: 缺少 DASHSCOPE_API_KEY)"
 
-    boundary = "----FormBoundary7MA4YWxkTrZu0gW"
-    body = b""
-    body += f"--{boundary}\r\n".encode()
-    body += b'Content-Disposition: form-data; name="file"; filename="audio.wav"\r\n'
-    body += b"Content-Type: audio/wav\r\n\r\n"
-    body += audio_bytes
-    body += f"\r\n--{boundary}\r\n".encode()
-    body += b'Content-Disposition: form-data; name="model"\r\n\r\n'
-    body += b"sensevoice-v1\r\n"
-    body += f"--{boundary}--\r\n".encode()
+    # Step 1: Base64 encode audio and build data URI
+    b64 = base64.b64encode(audio_bytes).decode("ascii")
+    data_uri = f"data:audio/wav;base64,{b64}"
+
+    # Step 2: Submit async transcription task
+    payload = json.dumps({
+        "model": "sensevoice-v1",
+        "input": {"file_urls": [data_uri]},
+    }).encode("utf-8")
 
     req = urllib.request.Request(
-        url="https://dashscope.aliyuncs.com/compatible-mode/v1/audio/transcriptions",
-        data=body,
+        url=DASHSCOPE_ASR_URL,
+        data=payload,
         headers={
-            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
+            "X-DashScope-Async": "enable",
         },
         method="POST",
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            return data.get("text", "(转写结果为空)")
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            submit_data = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="ignore")[:200]
-        return f"(语音转写失败: HTTP {exc.code} - {detail})"
+        return f"(语音转写提交失败: HTTP {exc.code} - {detail})"
     except Exception as e:
-        return f"(语音转写失败: {str(e)[:100]})"
+        return f"(语音转写提交失败: {str(e)[:100]})"
+
+    task_id = submit_data.get("output", {}).get("task_id", "")
+    if not task_id:
+        return "(语音转写失败: 未获取到 task_id)"
+
+    # Step 3: Poll for task completion
+    task_url = f"{DASHSCOPE_TASK_URL}/{task_id}"
+    for _ in range(30):  # max 30 seconds
+        time.sleep(1)
+        try:
+            poll_req = urllib.request.Request(
+                url=task_url,
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+            with urllib.request.urlopen(poll_req, timeout=10) as resp:
+                poll_data = json.loads(resp.read().decode("utf-8"))
+        except Exception:
+            continue
+
+        status = poll_data.get("output", {}).get("task_status", "")
+        if status == "SUCCEEDED":
+            results = poll_data.get("output", {}).get("results", [])
+            if not results:
+                return "(转写结果为空)"
+            transcription_url = results[0].get("transcription_url", "")
+            if not transcription_url:
+                return "(转写结果为空)"
+
+            # Step 4: Fetch transcription JSON
+            try:
+                with urllib.request.urlopen(transcription_url, timeout=10) as tr:
+                    tr_data = json.loads(tr.read().decode("utf-8"))
+                raw_text = tr_data.get("transcripts", [{}])[0].get("text", "")
+                # Strip SenseVoice tags like <|Speech|> and <|/Speech|>
+                clean = re.sub(r"<\|[^|]*\|>", "", raw_text).strip().rstrip(".")
+                return clean if clean else "(转写结果为空)"
+            except Exception as e:
+                return f"(转写结果获取失败: {str(e)[:100]})"
+
+        elif status == "FAILED":
+            msg = poll_data.get("output", {}).get("message", "unknown error")
+            return f"(语音转写失败: {msg[:100]})"
+
+    return "(语音转写超时)"
 
 
 class CamelIELTSAgent:

@@ -97,6 +97,9 @@ class SpeechRequest(BaseModel):
     format: Literal["wav", "mp3"] = "wav"
     model: Optional[str] = None
 
+class ImageRequest(BaseModel):
+    prompt: str
+
 
 # -----------------------------------------------------------
 # /api/* endpoints (used by PracticeBank.tsx)
@@ -171,6 +174,19 @@ async def api_get_question_bank():
         return {"questions": questions}
     except Exception as e:
         return {"error": f"获取题库出错: {str(e)}"}
+
+
+@fastapi_app.post("/api/generate-image")
+async def api_generate_image(req: ImageRequest):
+    if not req.prompt or not req.prompt.strip():
+        return {"url": ""}
+    try:
+        from engine.image_gen import generate_image
+        url = generate_image(req.prompt)
+        return {"url": url}
+    except Exception as e:
+        print(f"[WARN] Image generation failed: {e}")
+        return {"url": ""}
 
 
 # -----------------------------------------------------------
