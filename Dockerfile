@@ -15,8 +15,8 @@ RUN pip install --upgrade pip && \
 # 复制应用代码
 COPY . .
 
-# 如果存在前端dist目录，复制静态文件（如果不存在则跳过）
-COPY dist/ /home/user/app/dist/ 2>/dev/null || :
+# 如果存在前端dist目录，复制静态文件（使用RUN命令进行条件复制）
+RUN if [ -d "dist" ]; then cp -r dist /home/user/app/; fi
 
 # 创建非root用户并更改文件所有权
 RUN useradd -m -u 1000 user && \
