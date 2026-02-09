@@ -1,4 +1,5 @@
 import os
+import json
 import tempfile
 import uvicorn
 from pathlib import Path
@@ -62,6 +63,12 @@ except Exception as e:
     print(f"警告: TTS服务导入失败: {e}")
     def synthesize_speech(**kwargs):
         raise RuntimeError("TTS服务不可用")
+
+try:
+    from engine import openai_client
+except Exception as e:
+    print(f"警告: openai_client导入失败: {e}")
+    openai_client = None
 
 
 # 请求模型定义
@@ -206,6 +213,72 @@ async def health_check():
         "rag_module": rag_module is not None,
         "api_keys_configured": bool(API_KEY and DASHSCOPE_API_KEY)
     }
+
+
+class PolishRequest(BaseModel):
+    draft: str
+    context: str = ""
+    studentLevel: str = "6.0-6.5"
+    targetBand: float = 6.5
+    part: str = "P1"
+    isDirectExample: bool = False
+
+
+class TranslateWordRequest(BaseModel):
+    word: str
+
+
+@fastapi_app.post("/api/polish")
+async def polish_draft(req: PolishRequest):
+    """Polish a draft answer using the LLM, return English + Chinese + imagePrompt."""
+    if openai_client is None:
+        return {"en": req.draft, "cn": "(翻译暂不可用)", "imagePrompt": ""}
+
+    prompt = f"""Student Level: {req.studentLevel}, Target Band: {req.targetBand}.
+Type: Part {req.part}.
+{req.context}
+Draft: "{req.draft}".
+
+Task:
+1. {"Keep this text exactly as provided (do not refine it)." if req.isDirectExample else "Refine the draft into a Band 8.5 response."}
+2. Translate the English text to Chinese.
+3. Create a short image description for the scene.
+4. Return JSON with keys: en, cn, imagePrompt"""
+
+    try:
+        raw = openai_client.chat(
+            messages=[
+                {"role": "system", "content": "You are an IELTS speaking coach. Always respond with valid JSON containing keys: en, cn, imagePrompt."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.7,
+        )
+        result = json.loads(raw)
+        return {"en": result.get("en", req.draft), "cn": result.get("cn", ""), "imagePrompt": result.get("imagePrompt", "")}
+    except (json.JSONDecodeError, RuntimeError):
+        return {"en": req.draft, "cn": "(翻译暂不可用)", "imagePrompt": ""}
+
+
+@fastapi_app.post("/api/translate_word")
+async def translate_word(req: TranslateWordRequest):
+    """Translate an English word/phrase to Chinese with an emoji."""
+    if openai_client is None:
+        return {"translation": req.word, "emoji": "📝"}
+
+    prompt = f'Translate the English word/phrase "{req.word}" to Chinese contextually as used in IELTS. Also provide 1 relevant emoji. Return JSON {{ "translation": "...", "emoji": "..." }}'
+
+    try:
+        raw = openai_client.chat(
+            messages=[
+                {"role": "system", "content": "Always respond with valid JSON containing keys: translation, emoji."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.3,
+        )
+        result = json.loads(raw)
+        return {"translation": result.get("translation", ""), "emoji": result.get("emoji", "")}
+    except (json.JSONDecodeError, RuntimeError):
+        return {"translation": req.word, "emoji": "📝"}
 
 
 # 配置前端静态文件服务
