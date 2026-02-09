@@ -99,6 +99,7 @@ class SpeechRequest(BaseModel):
 
 class ImageRequest(BaseModel):
     prompt: str
+    words: str = ""
 
 
 # -----------------------------------------------------------
@@ -182,7 +183,20 @@ async def api_generate_image(req: ImageRequest):
         return {"url": ""}
     try:
         from engine.image_gen import generate_image
-        url = generate_image(req.prompt)
+
+        # Build a prompt that visually represents the selected vocabulary words
+        if req.words and req.words.strip():
+            word_list = req.words.strip()
+            enhanced_prompt = (
+                f"A single vivid illustration that visually represents these English words: {word_list}. "
+                f"Each word should be clearly depicted as a distinct visual element in the scene. "
+                f"Context: {req.prompt.strip()}. "
+                f"Style: clean, colorful, educational illustration with clear visual metaphors."
+            )
+        else:
+            enhanced_prompt = req.prompt.strip()
+
+        url = generate_image(enhanced_prompt)
         return {"url": url}
     except Exception as e:
         print(f"[WARN] Image generation failed: {e}")
