@@ -255,4 +255,12 @@ def modelscope_quickstart():
 
 
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", server_port=7860)
+    # 在魔搭创空间环境下配置Gradio
+    demo.launch(
+        server_name="0.0.0.0",
+        server_port=7860,
+        show_error=True,
+        quiet=False,
+        share=False,
+        debug=True
+    )
