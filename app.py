@@ -1,128 +1,45 @@
+import gradio as gr
 import os
-import json
-import re
-import time
 import tempfile
-import uvicorn
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Literal
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, Response
-from pydantic import BaseModel
+from engine.camel_agents import CamelIELTSAgent
+from engine.rag import AgenticRAG
+from engine import openai_client
+from engine.p1_service import ALLOWED_BANDS, generate_p1_answer
+from engine.tts import synthesize_speech
 
 
 # Load environment variables
+root_dir = Path(__file__).resolve().parent.parent
 from dotenv import load_dotenv
+load_dotenv(root_dir / ".env.local")
 load_dotenv()
 
-# 初始化FastAPI应用
-fastapi_app = FastAPI(title="MyIELTS Voice API")
-
-# 添加CORS中间件
-fastapi_app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# API密钥配置
+# Initialize engines with environment variables
 API_KEY = os.getenv("API_KEY") or os.getenv("GEMINI_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY")
 
-
-# 延迟初始化AI引擎，避免在缺少依赖或API密钥时崩溃
-camel_engine = None
-rag_module = None
-ALLOWED_BANDS = {"5.5", "6", "6.5", "7", "7.5", "8"}
-
-try:
-    from engine.camel_agents import CamelIELTSAgent
-    camel_engine = CamelIELTSAgent(api_key=API_KEY)
-except Exception as e:
-    print(f"警告: Camel代理初始化失败: {e}")
-
-try:
-    from engine.rag import AgenticRAG
-    rag_module = AgenticRAG()
-except Exception as e:
-    print(f"警告: RAG模块初始化失败: {e}")
-
-try:
-    from engine.p1_service import ALLOWED_BANDS, generate_p1_answer
-except Exception as e:
-    print(f"警告: P1服务导入失败: {e}")
-    def generate_p1_answer(**kwargs):
-        return "服务暂不可用"
-
-try:
-    from engine.tts import synthesize_speech
-except Exception as e:
-    print(f"警告: TTS服务导入失败: {e}")
-    def synthesize_speech(**kwargs):
-        raise RuntimeError("TTS服务不可用")
-
-try:
-    from engine import openai_client
-except Exception as e:
-    print(f"警告: openai_client导入失败: {e}")
-    openai_client = None
+camel_engine = CamelIELTSAgent(api_key=API_KEY)
+rag_module = AgenticRAG()
 
 
-# 请求模型定义
-class EvaluationRequest(BaseModel):
-    question: str
-    level: str
-    part: str = "P1"
-
-
-class P1ResponseRequest(BaseModel):
-    question: str
-    band: str
-    profile: Dict[str, Any] = {}
-
-
-class TTSRequest(BaseModel):
-    text: str
-    voice: str = None
-    audio_format: str = "wav"
-
-
-# API路由定义
-@fastapi_app.post("/api/process_evaluation")
-async def api_process_evaluation(
-    question: str = Form(...),
-    level: str = Form(...),
-    part: str = Form("P1"),
-    audio_file: UploadFile = File(...)
-):
-    """处理IELTS口语评估API接口，接收上传的音频文件"""
+def process_ielts_evaluation(audio_file, question, level, part="P1"):
+    """处理IELTS评估"""
     if not audio_file:
-        return {"error": "请上传音频文件。"}
+        return "请上传音频文件。", "", {}, "", 0
     
     if not question:
-        return {"error": "请输入问题。"}
+        return "请输入问题。", "", {}, "", 0
     
     if not level:
-        return {"error": "请选择目标分数。"}
+        return "请选择目标分数。", "", {}, "", 0
     
-    if camel_engine is None:
-        return {"error": "AI引擎未初始化，请检查API密钥配置。"}
-
     try:
-        # 保存上传的音频文件到临时位置
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_file:
-            temp_file.write(await audio_file.read())
-            temp_filename = temp_file.name
-
         # 读取音频文件
-        with open(temp_filename, 'rb') as f:
+        with open(audio_file, 'rb') as f:
             audio_bytes = f.read()
-
+        
         # 执行评估
         result = camel_engine.run_roleplay_evaluation(
             audio_bytes=audio_bytes,
@@ -130,329 +47,171 @@ async def api_process_evaluation(
             target_level=level,
             part=part
         )
-
-        # 删除临时文件
-        os.unlink(temp_filename)
-
-        return result
-
+        
+        # 构造返回结果
+        transcription = result.get("transcription", "")
+        scores = result.get("scores", {})
+        feedback = result.get("feedback", "")
+        xp_reward = result.get("xpReward", 0)
+        agent_thoughts = "\n".join(result.get("agent_thoughts", []))
+        
+        return feedback, transcription, scores, agent_thoughts, xp_reward
+        
     except Exception as e:
-        return {"error": f"处理出错: {str(e)}"}
+        return f"处理出错: {str(e)}", "", {}, "", 0
 
 
-@fastapi_app.post("/api/generate_p1_response")
-async def api_generate_p1_response(request: P1ResponseRequest):
-    """生成Part 1回答API接口"""
-    question = request.question
-    band = request.band
-    profile = request.profile
-
+def generate_p1_response(question, band, profile=None):
+    """生成Part 1回答"""
     if not question:
-        return {"error": "请输入问题。"}
-
+        return "请输入问题。"
+    
     if not band:
-        return {"error": "请选择目标分数。"}
-
+        return "请选择目标分数。"
+    
     if band not in ALLOWED_BANDS:
-        return {"error": f"无效的目标分数。允许的分数: {sorted(ALLOWED_BANDS)}"}
-
+        return f"无效的目标分数。允许的分数: {sorted(ALLOWED_BANDS)}"
+    
     try:
-        content = generate_p1_answer(question=question, band=band, profile=profile)
-        return {"content": content}
+        content = generate_p1_answer(question=question, band=band, profile=profile or {})
+        return content
     except Exception as e:
-        return {"error": f"生成回答出错: {str(e)}"}
+        return f"生成回答出错: {str(e)}"
 
 
-@fastapi_app.post("/api/text_to_speech")
-async def api_text_to_speech(request: TTSRequest):
-    """文字转语音API接口"""
-    text = request.text
-    voice = request.voice
-    audio_format = request.audio_format
-
+def text_to_speech(text, voice=None, audio_format="wav"):
+    """文字转语音"""
     if not text:
-        return {"error": "请输入要转换的文字。"}
-
+        return None, "请输入要转换的文字。"
+    
     if not DASHSCOPE_API_KEY:
-        return {"error": "缺少DASHSCOPE_API_KEY环境变量。"}
-
+        return None, "缺少DASHSCOPE_API_KEY环境变量。"
+    
     try:
         audio_bytes, content_type = synthesize_speech(
             text=text,
             voice=voice,
             audio_format=audio_format
         )
-
+        
         # 创建临时文件保存音频
         with tempfile.NamedTemporaryFile(delete=False, suffix=f".{audio_format}") as temp_file:
             temp_file.write(audio_bytes)
             temp_filename = temp_file.name
-
-        return {"audio_file": temp_filename, "message": "语音合成成功。"}
+        
+        return temp_filename, "语音合成成功。"
     except Exception as e:
-        return {"error": f"语音合成出错: {str(e)}"}
+        return None, f"语音合成出错: {str(e)}"
 
 
-@fastapi_app.get("/api/question_bank")
-async def api_get_question_bank():
-    """获取题库API接口"""
-    if rag_module is None:
-        return {"error": "RAG模块未初始化，请检查配置。"}
-
+def get_question_bank():
+    """获取题库"""
     try:
         questions = rag_module.get_question_context("all")
-        return {"questions": questions}
+        return str(questions)
     except Exception as e:
-        return {"error": f"获取题库出错: {str(e)}"}
+        return f"获取题库出错: {str(e)}"
 
 
-@fastapi_app.get("/api/health")
-async def health_check():
-    """API健康检查"""
-    return {
-        "status": "healthy", 
-        "camel_engine": camel_engine is not None, 
-        "rag_module": rag_module is not None,
-        "api_keys_configured": bool(API_KEY and DASHSCOPE_API_KEY)
-    }
-
-
-class PolishRequest(BaseModel):
-    draft: str
-    context: str = ""
-    studentLevel: str = "6.0-6.5"
-    targetBand: float = 6.5
-    part: str = "P1"
-    isDirectExample: bool = False
-
-
-class TranslateWordRequest(BaseModel):
-    word: str
-
-
-@fastapi_app.post("/api/polish")
-async def polish_draft(req: PolishRequest):
-    """Polish a draft answer using the LLM, return English + Chinese + imagePrompt."""
-    if openai_client is None:
-        return {"en": req.draft, "cn": "(翻译暂不可用)", "imagePrompt": ""}
-
-    prompt = f"""Student Level: {req.studentLevel}, Target Band: {req.targetBand}.
-Type: Part {req.part}.
-{req.context}
-Draft: "{req.draft}".
-
-Task:
-1. {"Keep this text exactly as provided (do not refine it)." if req.isDirectExample else "Refine the draft into a Band 8.5 response."}
-2. Translate the English text to Chinese.
-3. Create a short image description for the scene.
-4. Return JSON with keys: en, cn, imagePrompt"""
-
-    try:
-        raw = openai_client.chat(
-            messages=[
-                {"role": "system", "content": "You are an IELTS speaking coach. Always respond with valid JSON containing keys: en, cn, imagePrompt."},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.7,
-        )
-        result = json.loads(raw)
-        return {"en": result.get("en", req.draft), "cn": result.get("cn", ""), "imagePrompt": result.get("imagePrompt", "")}
-    except (json.JSONDecodeError, RuntimeError):
-        return {"en": req.draft, "cn": "(翻译暂不可用)", "imagePrompt": ""}
-
-
-@fastapi_app.post("/api/translate_word")
-async def translate_word(req: TranslateWordRequest):
-    """Translate an English word/phrase to Chinese with an emoji."""
-    if openai_client is None:
-        return {"translation": req.word, "emoji": "📝"}
-
-    prompt = f'Translate the English word/phrase "{req.word}" to Chinese contextually as used in IELTS. Also provide 1 relevant emoji. Return JSON {{ "translation": "...", "emoji": "..." }}'
-
-    try:
-        raw = openai_client.chat(
-            messages=[
-                {"role": "system", "content": "Always respond with valid JSON containing keys: translation, emoji."},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.3,
-        )
-        result = json.loads(raw)
-        return {"translation": result.get("translation", ""), "emoji": result.get("emoji", "")}
-    except (json.JSONDecodeError, RuntimeError):
-        return {"translation": req.word, "emoji": "📝"}
-
-
-# ============================================================
-# /v1 系列端点 - 前端 apiService.ts 和 TTSProvider.ts 所需
-# ============================================================
-
-class ChatMessage(BaseModel):
-    role: str
-    content: str
-
-class ChatCompletionRequest(BaseModel):
-    model: str = "myielts-multi-agent"
-    messages: List[ChatMessage]
-    metadata: Optional[Dict[str, Any]] = None
-
-class SpeechRequest(BaseModel):
-    input: str
-    voice: Optional[str] = None
-    format: Literal["wav", "mp3"] = "wav"
-    model: Optional[str] = None
-
-
-@fastapi_app.post("/v1/ielts/evaluate")
-async def ielts_evaluate(
-    audio: Optional[UploadFile] = File(None),
-    part: str = Form("P1"),
-    question: str = Form(""),
-    level: str = Form("6.0-6.5")
-):
-    """IELTS评估端点，与前端apiService.ts的callIELTSAgent对接。"""
-    if not audio:
-        raise HTTPException(status_code=400, detail="No audio file provided.")
-
-    if camel_engine is None:
-        raise HTTPException(status_code=503, detail="AI引擎未初始化，请检查API密钥配置。")
-
-    try:
-        audio_bytes = await audio.read()
-        result = await camel_engine.run_roleplay_evaluation(
-            audio_bytes=audio_bytes,
-            question=question,
-            target_level=level,
-            part=part
-        )
-        return {
-            "id": f"chatcmpl-{int(time.time())}",
-            "object": "chat.completion",
-            "created": int(time.time()),
-            "model": "myielts-multi-agent",
-            "choices": [{
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": result["feedback"],
-                    "metadata": {
-                        "transcription": result["transcription"],
-                        "scores": result["scores"],
-                        "agent_thoughts": result["agent_thoughts"],
-                        "xp_reward": result["xpReward"]
-                    }
-                },
-                "finish_reason": "stop"
-            }]
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@fastapi_app.post("/v1/chat/completions")
-async def chat_completions(payload: ChatCompletionRequest):
-    """OpenAI风格的chat端点，与前端generateP1Answer对接。"""
-    last_user_message = ""
-    for message in reversed(payload.messages):
-        if message.role == "user":
-            last_user_message = message.content
-            break
-
-    metadata = payload.metadata or {}
-
-    if metadata.get("task") == "p1_answer":
-        band = str(metadata.get("band", "")).strip()
-        if band not in ALLOWED_BANDS:
-            raise HTTPException(status_code=400, detail=f"Invalid band '{band}'.")
-        question = str(metadata.get("question") or last_user_message).strip()
-        if not question:
-            raise HTTPException(status_code=400, detail="Missing question.")
-        profile = metadata.get("profile") or {}
-        content = generate_p1_answer(question=question, band=band, profile=profile)
-    else:
-        if openai_client is None:
-            content = f"LLM unavailable\nFallback: {last_user_message or 'Sorry.'}"
-        else:
-            try:
-                content = openai_client.chat(
-                    messages=[{"role": m.role, "content": m.content} for m in payload.messages]
+# Gradio界面定义
+with gr.Blocks(title="MyIELTS Voice Practice Platform") as demo:
+    gr.Markdown("# MyIELTS Voice Practice Platform")
+    gr.Markdown("提升您的雅思口语技能，获得专业的反馈和评分。")
+    
+    with gr.Tab("IELTS口语评估"):
+        with gr.Row():
+            with gr.Column():
+                gr.Markdown("### 上传音频并获得评估")
+                audio_input = gr.Audio(type="filepath", label="上传您的回答音频")
+                question_input = gr.Textbox(label="问题", placeholder="请输入雅思口语问题")
+                level_input = gr.Dropdown(
+                    choices=["4.0-4.5", "5.0-5.5", "6.0-6.5", "7.0-7.5", "8.0-8.5"], 
+                    label="目标分数", 
+                    value="6.0-6.5"
                 )
-            except RuntimeError:
-                content = f"LLM unavailable\nFallback: {last_user_message or 'Sorry.'}"
-
-    return {
-        "id": f"chatcmpl-{int(time.time())}",
-        "object": "chat.completion",
-        "created": int(time.time()),
-        "model": os.getenv("OPENAI_MODEL", payload.model),
-        "choices": [{
-            "index": 0,
-            "message": {"role": "assistant", "content": content},
-            "finish_reason": "stop"
-        }]
-    }
-
-
-@fastapi_app.post("/v1/audio/speech")
-async def audio_speech(payload: SpeechRequest):
-    """TTS端点，与前端TTSProvider.ts对接。"""
-    text = payload.input.strip()
-    if not text:
-        raise HTTPException(status_code=400, detail="Field 'input' cannot be empty.")
-
-    try:
-        audio_bytes, content_type = synthesize_speech(
-            text=text,
-            voice=payload.voice,
-            audio_format=payload.format,
-            model=payload.model,
+                part_input = gr.Dropdown(
+                    choices=["P1", "P2", "P3"], 
+                    label="考试部分", 
+                    value="P1"
+                )
+                eval_btn = gr.Button("评估", variant="primary")
+                
+            with gr.Column():
+                gr.Markdown("### 评估结果")
+                feedback_output = gr.Textbox(label="反馈", interactive=False)
+                transcription_output = gr.Textbox(label="转录文本", interactive=False)
+                scores_output = gr.JSON(label="评分详情")
+                xp_output = gr.Number(label="经验值")
+                thoughts_output = gr.Textbox(label="评估过程", interactive=False)
+        
+        eval_btn.click(
+            fn=process_ielts_evaluation,
+            inputs=[audio_input, question_input, level_input, part_input],
+            outputs=[feedback_output, transcription_output, scores_output, thoughts_output, xp_output]
         )
-    except RuntimeError as exc:
-        message = str(exc)
-        status_code = 502
-        if "Missing DASHSCOPE_API_KEY" in message:
-            status_code = 500
-        if "Unsupported format" in message:
-            status_code = 400
-        raise HTTPException(status_code=status_code, detail=message)
+    
+    with gr.Tab("Part 1 回答生成"):
+        with gr.Row():
+            with gr.Column():
+                gr.Markdown("### 获取参考答案")
+                p1_question_input = gr.Textbox(label="问题", placeholder="请输入雅思Part 1话题问题")
+                p1_band_input = gr.Dropdown(
+                    choices=sorted(list(ALLOWED_BANDS)), 
+                    label="目标分数", 
+                    value="6.0-6.5"
+                )
+                p1_gen_btn = gr.Button("生成答案", variant="primary")
+                
+            with gr.Column():
+                gr.Markdown("### 参考答案")
+                p1_answer_output = gr.Textbox(label="参考答案", interactive=False)
+        
+        p1_gen_btn.click(
+            fn=generate_p1_response,
+            inputs=[p1_question_input, p1_band_input],
+            outputs=[p1_answer_output]
+        )
+    
+    with gr.Tab("文字转语音"):
+        with gr.Row():
+            with gr.Column():
+                gr.Markdown("### 文字转语音")
+                tts_text_input = gr.Textbox(label="输入文本", lines=5, placeholder="请输入要转换为语音的文本")
+                tts_voice_input = gr.Textbox(label="声音类型", placeholder="可选的声音类型")
+                tts_format_input = gr.Dropdown(
+                    choices=["wav", "mp3"], 
+                    label="音频格式", 
+                    value="wav"
+                )
+                tts_btn = gr.Button("生成语音", variant="primary")
+                
+            with gr.Column():
+                gr.Markdown("### 语音输出")
+                tts_audio_output = gr.Audio(label="语音输出")
+                tts_status_output = gr.Textbox(label="状态信息", interactive=False)
+        
+        tts_btn.click(
+            fn=text_to_speech,
+            inputs=[tts_text_input, tts_voice_input, tts_format_input],
+            outputs=[tts_audio_output, tts_status_output]
+        )
+    
+    with gr.Tab("题库查询"):
+        gr.Markdown("### 雅思口语题库")
+        bank_btn = gr.Button("获取题库", variant="primary")
+        bank_output = gr.Textbox(label="题库内容", lines=10, interactive=False)
+        
+        bank_btn.click(
+            fn=get_question_bank,
+            inputs=[],
+            outputs=[bank_output]
+        )
 
-    return Response(content=audio_bytes, media_type=content_type)
 
-
-# 配置前端静态文件服务
-frontend_dist_path = Path(__file__).parent / "dist"
-if frontend_dist_path.exists():
-    assets_dir = frontend_dist_path / "assets"
-    if assets_dir.exists():
-        fastapi_app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
-
-    @fastapi_app.get("/")
-    async def serve_frontend():
-        return FileResponse(str(frontend_dist_path / "index.html"))
-
-    @fastapi_app.get("/app")
-    async def serve_app():
-        return FileResponse(str(frontend_dist_path / "index.html"))
-else:
-    @fastapi_app.get("/")
-    async def root():
-        return {
-            "message": "MyIELTS Voice API 服务运行中",
-            "endpoints": [
-                "/api/health",
-                "/api/process_evaluation",
-                "/api/generate_p1_response", 
-                "/api/text_to_speech",
-                "/api/question_bank"
-            ],
-            "frontend": "React前端未找到，需要先构建前端项目"
-        }
+def modelscope_quickstart():
+    """魔搭创空间快速启动函数"""
+    return demo
 
 
 if __name__ == "__main__":
-    uvicorn.run(
-        fastapi_app,
-        host="0.0.0.0",
-        port=7860,
-        log_level="info"
-    )
+    demo.launch(server_name="0.0.0.0", server_port=7860)
