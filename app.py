@@ -1,13 +1,15 @@
 import os
 import json
+import re
+import time
 import tempfile
 import uvicorn
 from pathlib import Path
-from typing import Dict, Any
-from fastapi import FastAPI, File, UploadFile, Form
+from typing import Dict, Any, List, Optional, Literal
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
 
@@ -279,6 +281,142 @@ async def translate_word(req: TranslateWordRequest):
         return {"translation": result.get("translation", ""), "emoji": result.get("emoji", "")}
     except (json.JSONDecodeError, RuntimeError):
         return {"translation": req.word, "emoji": "📝"}
+
+
+# ============================================================
+# /v1 系列端点 - 前端 apiService.ts 和 TTSProvider.ts 所需
+# ============================================================
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+class ChatCompletionRequest(BaseModel):
+    model: str = "myielts-multi-agent"
+    messages: List[ChatMessage]
+    metadata: Optional[Dict[str, Any]] = None
+
+class SpeechRequest(BaseModel):
+    input: str
+    voice: Optional[str] = None
+    format: Literal["wav", "mp3"] = "wav"
+    model: Optional[str] = None
+
+
+@fastapi_app.post("/v1/ielts/evaluate")
+async def ielts_evaluate(
+    audio: Optional[UploadFile] = File(None),
+    part: str = Form("P1"),
+    question: str = Form(""),
+    level: str = Form("6.0-6.5")
+):
+    """IELTS评估端点，与前端apiService.ts的callIELTSAgent对接。"""
+    if not audio:
+        raise HTTPException(status_code=400, detail="No audio file provided.")
+
+    if camel_engine is None:
+        raise HTTPException(status_code=503, detail="AI引擎未初始化，请检查API密钥配置。")
+
+    try:
+        audio_bytes = await audio.read()
+        result = await camel_engine.run_roleplay_evaluation(
+            audio_bytes=audio_bytes,
+            question=question,
+            target_level=level,
+            part=part
+        )
+        return {
+            "id": f"chatcmpl-{int(time.time())}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": "myielts-multi-agent",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": result["feedback"],
+                    "metadata": {
+                        "transcription": result["transcription"],
+                        "scores": result["scores"],
+                        "agent_thoughts": result["agent_thoughts"],
+                        "xp_reward": result["xpReward"]
+                    }
+                },
+                "finish_reason": "stop"
+            }]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@fastapi_app.post("/v1/chat/completions")
+async def chat_completions(payload: ChatCompletionRequest):
+    """OpenAI风格的chat端点，与前端generateP1Answer对接。"""
+    last_user_message = ""
+    for message in reversed(payload.messages):
+        if message.role == "user":
+            last_user_message = message.content
+            break
+
+    metadata = payload.metadata or {}
+
+    if metadata.get("task") == "p1_answer":
+        band = str(metadata.get("band", "")).strip()
+        if band not in ALLOWED_BANDS:
+            raise HTTPException(status_code=400, detail=f"Invalid band '{band}'.")
+        question = str(metadata.get("question") or last_user_message).strip()
+        if not question:
+            raise HTTPException(status_code=400, detail="Missing question.")
+        profile = metadata.get("profile") or {}
+        content = generate_p1_answer(question=question, band=band, profile=profile)
+    else:
+        if openai_client is None:
+            content = f"LLM unavailable\nFallback: {last_user_message or 'Sorry.'}"
+        else:
+            try:
+                content = openai_client.chat(
+                    messages=[{"role": m.role, "content": m.content} for m in payload.messages]
+                )
+            except RuntimeError:
+                content = f"LLM unavailable\nFallback: {last_user_message or 'Sorry.'}"
+
+    return {
+        "id": f"chatcmpl-{int(time.time())}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": os.getenv("OPENAI_MODEL", payload.model),
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": content},
+            "finish_reason": "stop"
+        }]
+    }
+
+
+@fastapi_app.post("/v1/audio/speech")
+async def audio_speech(payload: SpeechRequest):
+    """TTS端点，与前端TTSProvider.ts对接。"""
+    text = payload.input.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Field 'input' cannot be empty.")
+
+    try:
+        audio_bytes, content_type = synthesize_speech(
+            text=text,
+            voice=payload.voice,
+            audio_format=payload.format,
+            model=payload.model,
+        )
+    except RuntimeError as exc:
+        message = str(exc)
+        status_code = 502
+        if "Missing DASHSCOPE_API_KEY" in message:
+            status_code = 500
+        if "Unsupported format" in message:
+            status_code = 400
+        raise HTTPException(status_code=status_code, detail=message)
+
+    return Response(content=audio_bytes, media_type=content_type)
 
 
 # 配置前端静态文件服务
