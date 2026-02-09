@@ -12,8 +12,8 @@ RUN pip install --upgrade pip && \
     pip install -r requirements.txt && \
     pip cache purge
 
-# 如果存在前端dist目录，复制静态文件
-COPY dist/ /home/user/app/dist/ || true
+# 如果存在前端dist目录，复制静态文件（如果不存在则跳过）
+COPY dist/ /home/user/app/dist/ 2>/dev/null || :
 
 # 创建非root用户并更改文件所有权
 RUN useradd -m -u 1000 user && \
