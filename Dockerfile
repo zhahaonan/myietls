@@ -13,7 +13,7 @@ RUN pip install --upgrade pip && \
     pip cache purge
 
 # 如果存在前端dist目录，复制静态文件
-COPY dist/ /home/user/app/dist/ 2>/dev/null || echo "No frontend dist found"
+COPY dist/ /home/user/app/dist/ || true
 
 # 创建非root用户并更改文件所有权
 RUN useradd -m -u 1000 user && \
