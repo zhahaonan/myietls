@@ -12,9 +12,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 
 # Load environment variables
-root_dir = Path(__file__).resolve().parent.parent
 from dotenv import load_dotenv
-load_dotenv(root_dir / ".env.local")
+# 只加载当前目录下的.env文件，避免在云端环境中出现路径问题
 load_dotenv()
 
 # 初始化FastAPI应用以添加CORS支持
@@ -32,8 +31,18 @@ API_KEY = os.getenv("API_KEY") or os.getenv("GEMINI_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY")
 
-camel_engine = CamelIELTSAgent(api_key=API_KEY)
-rag_module = AgenticRAG()
+# 延迟初始化AI引擎，避免在缺少API密钥时立即报错
+try:
+    camel_engine = CamelIELTSAgent(api_key=API_KEY)
+except Exception as e:
+    print(f"警告: Camel代理初始化失败: {e}")
+    camel_engine = None
+
+try:
+    rag_module = AgenticRAG()
+except Exception as e:
+    print(f"警告: RAG模块初始化失败: {e}")
+    rag_module = None
 
 
 def process_ielts_evaluation(audio_file, question, level, part="P1"):
@@ -46,6 +55,9 @@ def process_ielts_evaluation(audio_file, question, level, part="P1"):
     
     if not level:
         return "请选择目标分数。", "", {}, "", 0
+    
+    if camel_engine is None:
+        return "AI引擎未初始化，请检查API密钥配置。", "", {}, "", 0
     
     try:
         # 读取音频文件
@@ -118,6 +130,8 @@ def text_to_speech(text, voice=None, audio_format="wav"):
 
 def get_question_bank():
     """获取题库"""
+    if rag_module is None:
+        return "RAG模块未初始化，请检查配置。"
     try:
         questions = rag_module.get_question_context("all")
         return str(questions)
