@@ -4,13 +4,16 @@ FROM modelscope-registry.cn-beijing.cr.aliyuncs.com/modelscope-repo/python:3.10
 # 设置工作目录
 WORKDIR /home/user/app
 
-# 复制后端项目文件 (以root用户身份)
-COPY . /home/user/app
+# 复制依赖文件并安装，利用Docker缓存层优化构建速度
+COPY requirements.txt .
 
-# 升级pip并安装后端依赖 (以root用户身份)
+# 升级pip并安装依赖，清理缓存以减小镜像大小
 RUN pip install --upgrade pip && \
     pip install -r requirements.txt && \
     pip cache purge
+
+# 复制应用代码
+COPY . .
 
 # 如果存在前端dist目录，复制静态文件（如果不存在则跳过）
 COPY dist/ /home/user/app/dist/ 2>/dev/null || :
