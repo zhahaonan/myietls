@@ -1,5 +1,6 @@
 import os
 import tempfile
+import uvicorn
 from pathlib import Path
 from typing import Dict, Any
 from fastapi import FastAPI, File, UploadFile, Form
@@ -18,19 +19,17 @@ from engine.tts import synthesize_speech
 from dotenv import load_dotenv
 load_dotenv()
 
-
-# 初始化FastAPI应用以添加CORS支持
+# 初始化FastAPI应用
 fastapi_app = FastAPI(title="MyIELTS Voice API")
 
-# 添加CORS中间件以支持前端访问
+# 添加CORS中间件
 fastapi_app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 在生产环境中应该指定具体的域名
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 # API密钥配置
 API_KEY = os.getenv("API_KEY") or os.getenv("GEMINI_API_KEY")
@@ -196,13 +195,21 @@ async def health_check():
     }
 
 
-# 配置静态文件服务 - 指向项目根目录的dist文件夹
-frontend_dist_path = Path(__file__).parent.parent / "dist"
+# 配置前端静态文件服务
+frontend_dist_path = Path(__file__).parent / "dist"
 if frontend_dist_path.exists():
-    # 挂载前端静态文件
-    fastapi_app.mount("/", StaticFiles(directory=str(frontend_dist_path)), name="frontend")
+    assets_dir = frontend_dist_path / "assets"
+    if assets_dir.exists():
+        fastapi_app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+
+    @fastapi_app.get("/")
+    async def serve_frontend():
+        return FileResponse(str(frontend_dist_path / "index.html"))
+
+    @fastapi_app.get("/app")
+    async def serve_app():
+        return FileResponse(str(frontend_dist_path / "index.html"))
 else:
-    # 如果没有构建的前端，则提供一个简单的API说明页
     @fastapi_app.get("/")
     async def root():
         return {
@@ -217,39 +224,8 @@ else:
             "frontend": "React前端未找到，需要先构建前端项目"
         }
 
-    # SPA路由处理 - 将所有未匹配的路由指向API
-    @fastapi_app.get("/{full_path:path}")
-    async def catch_all(full_path: str):
-        return {
-            "message": "MyIELTS Voice API 服务运行中",
-            "endpoint": f"/{full_path}",
-            "available_endpoints": [
-                "/api/health",
-                "/api/process_evaluation",
-                "/api/generate_p1_response", 
-                "/api/text_to_speech",
-                "/api/question_bank"
-            ]
-        }
-
-
-def modelscope_quickstart():
-    """魔搭创空间快速启动函数"""
-    import uvicorn
-    
-    # 使用uvicorn运行FastAPI应用
-    uvicorn.run(
-        fastapi_app,
-        host="0.0.0.0",
-        port=7860,
-        log_level="info"
-    )
-
 
 if __name__ == "__main__":
-    import uvicorn
-    
-    # 在魔搭创空间环境下运行FastAPI应用
     uvicorn.run(
         fastapi_app,
         host="0.0.0.0",
