@@ -215,10 +215,13 @@ async def api_generate_image(req: ImageRequest):
         else:
             enhanced_prompt = req.prompt.strip() + " No text, no labels, no words in the image."
 
-        url = generate_image(enhanced_prompt)
+        print(f"[INFO] generate-image: prompt={enhanced_prompt[:100]}...")
+        url = await generate_image(enhanced_prompt)
+        print(f"[INFO] generate-image: result url={'(empty)' if not url else url[:80]}")
         return {"url": url}
     except Exception as e:
         print(f"[WARN] Image generation failed: {e}")
+        import traceback; traceback.print_exc()
         return {"url": ""}
 
 
