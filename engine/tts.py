@@ -4,8 +4,10 @@ import urllib.error
 import urllib.request
 from typing import Optional, Tuple
 
-DASHSCOPE_TTS_ENDPOINT = "https://dashscope.aliyuncs.com/api/v1/services/audio/tts/text-to-audio"
-DEFAULT_TTS_MODEL = "qwen3-tts-instruct-flash-realtime-2026-01-22"
+DASHSCOPE_TTS_URL = (
+    "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+)
+DEFAULT_TTS_MODEL = "qwen-tts"
 DEFAULT_TTS_VOICE = "cherry"
 
 
@@ -24,38 +26,52 @@ def synthesize_speech(
         raise RuntimeError("Unsupported format. Use 'wav' or 'mp3'.")
 
     payload = {
-        "model": model or os.getenv("DASHSCOPE_TTS_MODEL", DEFAULT_TTS_MODEL),
+        "model": model or DEFAULT_TTS_MODEL,
         "input": {"text": text},
         "parameters": {
-            "voice": voice or os.getenv("DASHSCOPE_TTS_VOICE", DEFAULT_TTS_VOICE),
+            "voice": voice or DEFAULT_TTS_VOICE,
             "format": normalized_format,
-            "sample_rate": 24000,
-            "volume": 50,
-            "rate": 1.0,
-            "pitch": 1.0,
         },
     }
 
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
-        url=DASHSCOPE_TTS_ENDPOINT,
+        url=DASHSCOPE_TTS_URL,
         data=body,
         headers={
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
-            "X-DashScope-Data-Inspection": "enable",
         },
         method="POST",
     )
 
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
-            audio_bytes = resp.read()
+            data = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="ignore")
         raise RuntimeError(f"DashScope TTS request failed ({exc.code}): {detail}") from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(f"DashScope TTS connection failed: {exc.reason}") from exc
+
+    audio_url = (
+        data.get("output", {})
+        .get("audio", {})
+        .get("url", "")
+    )
+    if not audio_url:
+        raise RuntimeError("DashScope TTS returned no audio URL.")
+
+    # Download the audio file from the returned URL
+    try:
+        audio_req = urllib.request.Request(url=audio_url)
+        with urllib.request.urlopen(audio_req, timeout=30) as audio_resp:
+            audio_bytes = audio_resp.read()
+    except Exception as exc:
+        raise RuntimeError(f"Failed to download TTS audio: {exc}") from exc
+
+    if not audio_bytes:
+        raise RuntimeError("Downloaded TTS audio is empty.")
 
     content_type = "audio/wav" if normalized_format == "wav" else "audio/mpeg"
     return audio_bytes, content_type

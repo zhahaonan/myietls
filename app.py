@@ -97,6 +97,10 @@ class SpeechRequest(BaseModel):
     format: Literal["wav", "mp3"] = "wav"
     model: Optional[str] = None
 
+class ImageRequest(BaseModel):
+    prompt: str
+    words: str = ""
+
 
 # -----------------------------------------------------------
 # /api/* endpoints (used by PracticeBank.tsx)
@@ -114,6 +118,7 @@ async def health_check():
 @fastapi_app.post("/api/polish")
 async def polish_draft(req: PolishRequest):
     if llm_client is None:
+        print("[ERROR] polish: llm_client is None - DASHSCOPE_API_KEY may be missing")
         return {"en": req.draft, "cn": "(翻译暂不可用)", "imagePrompt": ""}
 
     prompt = f"""Student Level: {req.studentLevel}, Target Band: {req.targetBand}.
@@ -125,19 +130,30 @@ Task:
 1. {"Keep this text exactly as provided (do not refine it)." if req.isDirectExample else "Refine the draft into a Band 8.5 response."}
 2. Translate the English text to Chinese.
 3. Create a short image description for the scene.
-4. Return JSON with keys: en, cn, imagePrompt"""
+4. Return JSON with keys: en, cn, imagePrompt. Do NOT wrap in markdown code fences."""
 
     try:
         raw = llm_client.chat(
             messages=[
-                {"role": "system", "content": "You are an IELTS speaking coach. Always respond with valid JSON containing keys: en, cn, imagePrompt."},
+                {"role": "system", "content": "You are an IELTS speaking coach. Always respond with valid JSON containing keys: en, cn, imagePrompt. Do NOT use markdown code fences."},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.7,
         )
-        result = json.loads(raw)
+        # Strip markdown fences if LLM wraps output in ```json...```
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            import re
+            cleaned = re.sub(r"^```\w*\n?", "", cleaned)
+            cleaned = re.sub(r"\n?```$", "", cleaned)
+            cleaned = cleaned.strip()
+        result = json.loads(cleaned)
         return {"en": result.get("en", req.draft), "cn": result.get("cn", ""), "imagePrompt": result.get("imagePrompt", "")}
-    except (json.JSONDecodeError, RuntimeError):
+    except json.JSONDecodeError as e:
+        print(f"[ERROR] polish JSON parse failed: {e}\nRaw LLM output: {raw[:300]}")
+        return {"en": req.draft, "cn": "(翻译暂不可用)", "imagePrompt": ""}
+    except RuntimeError as e:
+        print(f"[ERROR] polish LLM call failed: {e}")
         return {"en": req.draft, "cn": "(翻译暂不可用)", "imagePrompt": ""}
 
 
@@ -151,14 +167,21 @@ async def translate_word(req: TranslateWordRequest):
     try:
         raw = llm_client.chat(
             messages=[
-                {"role": "system", "content": "Always respond with valid JSON containing keys: translation, emoji."},
+                {"role": "system", "content": "Always respond with valid JSON containing keys: translation, emoji. No markdown fences."},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.3,
         )
-        result = json.loads(raw)
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            import re
+            cleaned = re.sub(r"^```\w*\n?", "", cleaned)
+            cleaned = re.sub(r"\n?```$", "", cleaned)
+            cleaned = cleaned.strip()
+        result = json.loads(cleaned)
         return {"translation": result.get("translation", ""), "emoji": result.get("emoji", "")}
-    except (json.JSONDecodeError, RuntimeError):
+    except (json.JSONDecodeError, RuntimeError) as e:
+        print(f"[WARN] translate_word failed: {e}")
         return {"translation": req.word, "emoji": "📝"}
 
 
@@ -173,6 +196,35 @@ async def api_get_question_bank():
         return {"error": f"获取题库出错: {str(e)}"}
 
 
+@fastapi_app.post("/api/generate-image")
+async def api_generate_image(req: ImageRequest):
+    if not req.prompt or not req.prompt.strip():
+        return {"url": ""}
+    try:
+        from engine.image_gen import generate_image
+
+        # Build a prompt that visually represents the selected vocabulary words
+        if req.words and req.words.strip():
+            word_list = req.words.strip()
+            enhanced_prompt = (
+                f"A photorealistic scene without any text, words, labels, or watermarks. "
+                f"The scene naturally shows: {word_list}. "
+                f"Scene context: {req.prompt.strip()}. "
+                f"Style: high quality photograph, vivid colors, no text overlay, no captions, no annotations."
+            )
+        else:
+            enhanced_prompt = req.prompt.strip() + " No text, no labels, no words in the image."
+
+        print(f"[INFO] generate-image: prompt={enhanced_prompt[:100]}...")
+        url = await generate_image(enhanced_prompt)
+        print(f"[INFO] generate-image: result url={'(empty)' if not url else url[:80]}")
+        return {"url": url}
+    except Exception as e:
+        print(f"[WARN] Image generation failed: {e}")
+        import traceback; traceback.print_exc()
+        return {"url": ""}
+
+
 # -----------------------------------------------------------
 # /v1/* endpoints (used by apiService.ts & TTSProvider.ts)
 # -----------------------------------------------------------
@@ -182,11 +234,17 @@ async def ielts_evaluate(
     part: str = Form("P1"),
     question: str = Form(""),
     level: str = Form("6.0-6.5"),
+    anchor_words: str = Form("[]"),
 ):
     if not audio:
         raise HTTPException(status_code=400, detail="No audio file provided.")
     if camel_engine is None:
         raise HTTPException(status_code=503, detail="AI 引擎未初始化")
+
+    try:
+        words_list = json.loads(anchor_words)
+    except (json.JSONDecodeError, TypeError):
+        words_list = []
 
     try:
         audio_bytes = await audio.read()
@@ -195,6 +253,7 @@ async def ielts_evaluate(
             question=question,
             target_level=level,
             part=part,
+            anchor_words=words_list,
         )
         return {
             "id": f"chatcmpl-{int(time.time())}",
@@ -211,6 +270,8 @@ async def ielts_evaluate(
                         "scores": result["scores"],
                         "agent_thoughts": result["agent_thoughts"],
                         "xp_reward": result["xpReward"],
+                        "pronunciation_feedback": result.get("pronunciation_feedback", []),
+                        "detected_errors": result.get("detected_errors", []),
                     },
                 },
                 "finish_reason": "stop",
