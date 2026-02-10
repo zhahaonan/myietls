@@ -98,7 +98,7 @@ class SpeechRequest(BaseModel):
     model: Optional[str] = None
 
 class ImageRequest(BaseModel):
-    prompt: str
+    prompt: str = ""
     words: str = ""
 
 
@@ -119,7 +119,7 @@ async def health_check():
 async def polish_draft(req: PolishRequest):
     if llm_client is None:
         print("[ERROR] polish: llm_client is None - DASHSCOPE_API_KEY may be missing")
-        return {"en": req.draft, "cn": "(翻译暂不可用)", "imagePrompt": ""}
+        return {"en": req.draft, "cn": "(翻译暂不可用)", "imagePrompt": "", "error": "LLM 未初始化 (DASHSCOPE_API_KEY 可能缺失)"}
 
     prompt = f"""Student Level: {req.studentLevel}, Target Band: {req.targetBand}.
 Type: Part {req.part}.
@@ -151,16 +151,16 @@ Task:
         return {"en": result.get("en", req.draft), "cn": result.get("cn", ""), "imagePrompt": result.get("imagePrompt", "")}
     except json.JSONDecodeError as e:
         print(f"[ERROR] polish JSON parse failed: {e}\nRaw LLM output: {raw[:300]}")
-        return {"en": req.draft, "cn": "(翻译暂不可用)", "imagePrompt": ""}
+        return {"en": req.draft, "cn": "(翻译暂不可用)", "imagePrompt": "", "error": f"LLM 返回 JSON 解析失败: {e}"}
     except RuntimeError as e:
         print(f"[ERROR] polish LLM call failed: {e}")
-        return {"en": req.draft, "cn": "(翻译暂不可用)", "imagePrompt": ""}
+        return {"en": req.draft, "cn": "(翻译暂不可用)", "imagePrompt": "", "error": f"LLM 调用失败: {e}"}
 
 
 @fastapi_app.post("/api/translate_word")
 async def translate_word(req: TranslateWordRequest):
     if llm_client is None:
-        return {"translation": req.word, "emoji": "📝"}
+        return {"translation": req.word, "emoji": "📝", "error": "LLM 未初始化"}
 
     prompt = f'Translate the English word/phrase "{req.word}" to Chinese contextually as used in IELTS. Also provide 1 relevant emoji. Return JSON {{ "translation": "...", "emoji": "..." }}'
 
@@ -182,7 +182,7 @@ async def translate_word(req: TranslateWordRequest):
         return {"translation": result.get("translation", ""), "emoji": result.get("emoji", "")}
     except (json.JSONDecodeError, RuntimeError) as e:
         print(f"[WARN] translate_word failed: {e}")
-        return {"translation": req.word, "emoji": "📝"}
+        return {"translation": req.word, "emoji": "📝", "error": f"翻译失败: {e}"}
 
 
 @fastapi_app.get("/api/question_bank")
@@ -198,20 +198,32 @@ async def api_get_question_bank():
 
 @fastapi_app.post("/api/generate-image")
 async def api_generate_image(req: ImageRequest):
-    if not req.prompt or not req.prompt.strip():
-        return {"url": ""}
+    has_prompt = req.prompt and req.prompt.strip()
+    has_words = req.words and req.words.strip()
+
+    if not has_prompt and not has_words:
+        return {"url": "", "error": "未提供图片描述或锚点词"}
+
     try:
-        from engine.image_gen import generate_image
+        from engine.image_gen import generate_image, ImageGenError
 
         # Build a prompt that visually represents the selected vocabulary words
-        if req.words and req.words.strip():
+        if has_words:
             word_list = req.words.strip()
-            enhanced_prompt = (
-                f"A photorealistic scene without any text, words, labels, or watermarks. "
-                f"The scene naturally shows: {word_list}. "
-                f"Scene context: {req.prompt.strip()}. "
-                f"Style: high quality photograph, vivid colors, no text overlay, no captions, no annotations."
-            )
+            if has_prompt:
+                enhanced_prompt = (
+                    f"A photorealistic scene without any text, words, labels, or watermarks. "
+                    f"The scene naturally shows: {word_list}. "
+                    f"Scene context: {req.prompt.strip()}. "
+                    f"Style: high quality photograph, vivid colors, no text overlay, no captions, no annotations."
+                )
+            else:
+                # No scene prompt from LLM, build one purely from anchor words
+                enhanced_prompt = (
+                    f"A photorealistic scene without any text, words, labels, or watermarks. "
+                    f"The scene naturally shows: {word_list}. "
+                    f"Style: high quality photograph, vivid colors, no text overlay, no captions, no annotations."
+                )
         else:
             enhanced_prompt = req.prompt.strip() + " No text, no labels, no words in the image."
 
@@ -219,10 +231,13 @@ async def api_generate_image(req: ImageRequest):
         url = await generate_image(enhanced_prompt)
         print(f"[INFO] generate-image: result url={'(empty)' if not url else url[:80]}")
         return {"url": url}
+    except ImageGenError as e:
+        print(f"[WARN] Image generation failed: {e}")
+        return {"url": "", "error": str(e)}
     except Exception as e:
         print(f"[WARN] Image generation failed: {e}")
         import traceback; traceback.print_exc()
-        return {"url": ""}
+        return {"url": "", "error": f"图片生成异常: {e}"}
 
 
 # -----------------------------------------------------------
