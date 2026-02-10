@@ -118,6 +118,7 @@ async def health_check():
 @fastapi_app.post("/api/polish")
 async def polish_draft(req: PolishRequest):
     if llm_client is None:
+        print("[ERROR] polish: llm_client is None - DASHSCOPE_API_KEY may be missing")
         return {"en": req.draft, "cn": "(翻译暂不可用)", "imagePrompt": ""}
 
     prompt = f"""Student Level: {req.studentLevel}, Target Band: {req.targetBand}.
@@ -129,19 +130,30 @@ Task:
 1. {"Keep this text exactly as provided (do not refine it)." if req.isDirectExample else "Refine the draft into a Band 8.5 response."}
 2. Translate the English text to Chinese.
 3. Create a short image description for the scene.
-4. Return JSON with keys: en, cn, imagePrompt"""
+4. Return JSON with keys: en, cn, imagePrompt. Do NOT wrap in markdown code fences."""
 
     try:
         raw = llm_client.chat(
             messages=[
-                {"role": "system", "content": "You are an IELTS speaking coach. Always respond with valid JSON containing keys: en, cn, imagePrompt."},
+                {"role": "system", "content": "You are an IELTS speaking coach. Always respond with valid JSON containing keys: en, cn, imagePrompt. Do NOT use markdown code fences."},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.7,
         )
-        result = json.loads(raw)
+        # Strip markdown fences if LLM wraps output in ```json...```
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            import re
+            cleaned = re.sub(r"^```\w*\n?", "", cleaned)
+            cleaned = re.sub(r"\n?```$", "", cleaned)
+            cleaned = cleaned.strip()
+        result = json.loads(cleaned)
         return {"en": result.get("en", req.draft), "cn": result.get("cn", ""), "imagePrompt": result.get("imagePrompt", "")}
-    except (json.JSONDecodeError, RuntimeError):
+    except json.JSONDecodeError as e:
+        print(f"[ERROR] polish JSON parse failed: {e}\nRaw LLM output: {raw[:300]}")
+        return {"en": req.draft, "cn": "(翻译暂不可用)", "imagePrompt": ""}
+    except RuntimeError as e:
+        print(f"[ERROR] polish LLM call failed: {e}")
         return {"en": req.draft, "cn": "(翻译暂不可用)", "imagePrompt": ""}
 
 
@@ -155,14 +167,21 @@ async def translate_word(req: TranslateWordRequest):
     try:
         raw = llm_client.chat(
             messages=[
-                {"role": "system", "content": "Always respond with valid JSON containing keys: translation, emoji."},
+                {"role": "system", "content": "Always respond with valid JSON containing keys: translation, emoji. No markdown fences."},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.3,
         )
-        result = json.loads(raw)
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            import re
+            cleaned = re.sub(r"^```\w*\n?", "", cleaned)
+            cleaned = re.sub(r"\n?```$", "", cleaned)
+            cleaned = cleaned.strip()
+        result = json.loads(cleaned)
         return {"translation": result.get("translation", ""), "emoji": result.get("emoji", "")}
-    except (json.JSONDecodeError, RuntimeError):
+    except (json.JSONDecodeError, RuntimeError) as e:
+        print(f"[WARN] translate_word failed: {e}")
         return {"translation": req.word, "emoji": "📝"}
 
 
@@ -249,6 +268,7 @@ async def ielts_evaluate(
                         "agent_thoughts": result["agent_thoughts"],
                         "xp_reward": result["xpReward"],
                         "pronunciation_feedback": result.get("pronunciation_feedback", []),
+                        "detected_errors": result.get("detected_errors", []),
                     },
                 },
                 "finish_reason": "stop",

@@ -15,6 +15,17 @@ DASHSCOPE_ASR_URL = (
 DASHSCOPE_TASK_URL = "https://dashscope.aliyuncs.com/api/v1/tasks"
 
 
+def _parse_llm_json(raw: str):
+    """Strip markdown fences and parse JSON from LLM output."""
+    text = raw.strip()
+    # Remove ```json ... ``` or ``` ... ```
+    if text.startswith("```"):
+        text = re.sub(r"^```\w*\n?", "", text)
+        text = re.sub(r"\n?```$", "", text)
+        text = text.strip()
+    return json.loads(text)
+
+
 def _transcribe_audio(audio_bytes: bytes) -> str:
     """Transcribe audio using DashScope SenseVoice (async API with base64)."""
     api_key = os.getenv("DASHSCOPE_API_KEY", "").strip()
@@ -124,11 +135,7 @@ def _analyze_pronunciation(transcription: str, anchor_words: List[str]) -> List[
             temperature=0.2,
         )
         # Strip markdown fences if present
-        cleaned = raw.strip()
-        if cleaned.startswith("```"):
-            cleaned = re.sub(r"^```\w*\n?", "", cleaned)
-            cleaned = re.sub(r"\n?```$", "", cleaned)
-        return json.loads(cleaned)
+        return _parse_llm_json(raw)
     except (json.JSONDecodeError, RuntimeError):
         # Fallback: simple string matching, no IPA
         result = []
@@ -218,7 +225,7 @@ class CamelIELTSAgent:
             messages=[
                 {
                     "role": "system",
-                    "content": "你是游戏管理员 (GM)。将分数和报告定稿为 JSON 格式。只返回有效的 JSON，不要任何其他内容。",
+                    "content": "你是游戏管理员 (GM)。将分数和报告定稿为 JSON 格式。只返回有效的 JSON，不要任何其他内容。不要用 markdown 代码块包裹。",
                 },
                 {
                     "role": "user",
@@ -226,7 +233,8 @@ class CamelIELTSAgent:
                         f"整合:\n"
                         f"考官: {initial_assessment}\n"
                         f"评论家: {critic_report}\n"
-                        f'返回 JSON: {{ "scores": {{ "fluency": float, "lexical": float, "grammar": float, "pronunciation": float }}, "report": str, "xp": int }}'
+                        f'返回 JSON: {{ "scores": {{ "fluency": float, "lexical": float, "grammar": float, "pronunciation": float }}, "report": str, "xp": int, '
+                        f'"errors": [{{ "type": "grammar|lexical|pronunciation|fluency", "original": "学生原始表达", "correction": "正确表达", "explanation": "中文解释(20字内)" }}] }}'
                     ),
                 },
             ],
@@ -234,7 +242,7 @@ class CamelIELTSAgent:
         )
 
         try:
-            final_json = json.loads(gm_raw)
+            final_json = _parse_llm_json(gm_raw)
         except json.JSONDecodeError:
             # If the LLM didn't return valid JSON, provide defaults
             final_json = {
@@ -255,4 +263,5 @@ class CamelIELTSAgent:
             "feedback": f"{final_json.get('report')}\n\n语言升级建议:\n{critic_report}",
             "xpReward": final_json.get("xp", 100),
             "pronunciation_feedback": pronunciation_feedback,
+            "detected_errors": final_json.get("errors", []),
         }
