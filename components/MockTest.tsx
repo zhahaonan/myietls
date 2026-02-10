@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
-import { callIELTSAgent, speakWithAliyun } from '../services/apiService';
-import { TestScore, UserProfile } from '../types';
+import { callIELTSAgent, speakWithAliyun, DetectedError } from '../services/apiService';
+import { TestScore, UserProfile, SpeakingError } from '../types';
 import PixelAvatar from './PixelAvatar';
 
 interface MockTestProps {
@@ -11,10 +11,10 @@ interface MockTestProps {
 }
 
 const EXAMINERS = [
-  { id: 'aiden', name: 'Aiden', accent: 'British', voice: 'cherry', icon: '👨‍🏫', flag: '🇬🇧', desc: 'Strict but professional' },
+  { id: 'aiden', name: 'Aiden', accent: 'British', voice: 'ethan', icon: '👨‍🏫', flag: '🇬🇧', desc: 'Strict but professional' },
   { id: 'sophia', name: 'Sophia', accent: 'American', voice: 'cherry', icon: '👩‍🏫', flag: '🇺🇸', desc: 'Warm and encouraging' },
-  { id: 'oliver', name: 'Oliver', accent: 'Australian', voice: 'cherry', icon: '👨‍🌾', flag: '🇦🇺', desc: 'Relaxed and steady' },
-  { id: 'priya', name: 'Priya', accent: 'Indian', voice: 'cherry', icon: '👩🏾‍🏫', flag: '🇮🇳', desc: 'Clear and supportive' }
+  { id: 'oliver', name: 'Oliver', accent: 'Australian', voice: 'ethan', icon: '👨‍🌾', flag: '🇦🇺', desc: 'Relaxed and steady' },
+  { id: 'priya', name: 'Priya', accent: 'Indian', voice: 'chelsie', icon: '👩🏾‍🏫', flag: '🇮🇳', desc: 'Clear and supportive' }
 ];
 
 const MockTest: React.FC<MockTestProps> = ({ onComplete, onCancel, profile }) => {
@@ -26,6 +26,7 @@ const MockTest: React.FC<MockTestProps> = ({ onComplete, onCancel, profile }) =>
   const [thoughts, setThoughts] = useState<{agent: string, text: string, time: string}[]>([]);
   const [radarData, setRadarData] = useState({ fluency: 0, lexical: 0, grammar: 0, pronunciation: 0 });
   const [finalFeedback, setFinalFeedback] = useState("");
+  const [evalErrors, setEvalErrors] = useState<DetectedError[]>([]);
   const [currentQuestionText, setCurrentQuestionText] = useState("Could you describe a beautiful place you've visited recently?");
   
   // Part 2 Specific States
@@ -148,6 +149,7 @@ const MockTest: React.FC<MockTestProps> = ({ onComplete, onCancel, profile }) =>
 
     setRadarData(result.scores);
     setFinalFeedback(result.feedback);
+    setEvalErrors(result.detectedErrors || []);
     setStage('report');
   };
 
@@ -306,16 +308,30 @@ const MockTest: React.FC<MockTestProps> = ({ onComplete, onCancel, profile }) =>
 
                   {stage === 'report' && (
                      <button 
-                        onClick={() => onComplete({
-                           fluency: radarData.fluency,
-                           lexical: radarData.lexical,
-                           grammar: radarData.grammar,
-                           pronunciation: radarData.pronunciation,
-                           overall: (radarData.fluency + radarData.lexical + radarData.grammar + radarData.pronunciation) / 4,
-                           feedback: finalFeedback,
-                           date: new Date().toLocaleDateString(),
-                           xpEarned: 1200
-                        })}
+                        onClick={() => {
+                           // Convert detected errors to SpeakingError format
+                           const speakingErrors: SpeakingError[] = evalErrors.map((e, idx) => ({
+                             id: `err-${Date.now()}-${idx}`,
+                             type: (e.type as SpeakingError['type']) || 'grammar',
+                             original: e.original || '',
+                             correction: e.correction || '',
+                             explanation: e.explanation || '',
+                             date: new Date().toLocaleDateString(),
+                             practiced: false,
+                             recallCount: 0,
+                           }));
+                           onComplete({
+                             fluency: radarData.fluency,
+                             lexical: radarData.lexical,
+                             grammar: radarData.grammar,
+                             pronunciation: radarData.pronunciation,
+                             overall: (radarData.fluency + radarData.lexical + radarData.grammar + radarData.pronunciation) / 4,
+                             feedback: finalFeedback,
+                             date: new Date().toLocaleDateString(),
+                             xpEarned: 1200,
+                             detectedErrors: speakingErrors,
+                           });
+                        }}
                         className="w-full py-5 bg-emerald-600 text-white rounded-2xl font-black uppercase tracking-widest hover:bg-emerald-500 transition-colors"
                      >
                         Confirm & Save Report

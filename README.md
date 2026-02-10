@@ -1,3 +1,13 @@
+---
+title: MyIELTS Voice
+emoji: 🎙️
+colorFrom: blue
+colorTo: indigo
+sdk: gradio
+app_file: app.py
+pinned: false
+---
+
 # MyIELTS Voice 雅思口语智能教练
 
 <div align="center">

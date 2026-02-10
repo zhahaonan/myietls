@@ -1,12 +1,16 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { INITIAL_QUESTIONS, MATERIAL_ARCHETYPES } from '../constants';
-import { PracticeQuestion, UserProfile, MaterialArchetype, GoldenPhrase } from '../types';
-import { callIELTSAgent, speakWithAliyun } from '../services/apiService';
+import { PracticeQuestion, UserProfile, MaterialArchetype, GoldenPhrase, SpeakingError } from '../types';
+import { callIELTSAgent, speakWithAliyun, PronunciationItem } from '../services/apiService';
 
 interface FeedbackToken {
   text: string;
   isPhraseMatched?: boolean;
+  pronunciationStatus?: "correct" | "mispronounced";
+  ipa?: string;
+  hint?: string;
+  correctWord?: string;
 }
 
 interface PracticeBankProps {
@@ -33,6 +37,8 @@ const PracticeBank: React.FC<PracticeBankProps> = ({ profile, setProfile, onNewA
   const [isChallengeActive, setIsChallengeActive] = useState(false);
   const [agentThoughts, setAgentThoughts] = useState<string[]>([]);
   const [isGeneratingImage, setIsGeneratingImage] = useState(false);
+  const [savedImagePrompt, setSavedImagePrompt] = useState('');
+  const [imageError, setImageError] = useState('');
 
   const audioStreamRef = useRef<MediaStream | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -50,6 +56,11 @@ const PracticeBank: React.FC<PracticeBankProps> = ({ profile, setProfile, onNewA
     // Default P1 to text (examples) mode
     if (activeTab === 'P1') setInputMode('text');
   }, [activeTab]);
+
+  // Also reset imageError when challenge resets
+  useEffect(() => {
+    if (!isChallengeActive) setImageError('');
+  }, [isChallengeActive]);
 
   const speak = async (text: string) => {
     if (isSpeaking) return;
@@ -118,6 +129,11 @@ const PracticeBank: React.FC<PracticeBankProps> = ({ profile, setProfile, onNewA
       
       setSelectedQuestion(polishedQ);
       setCurrentStep('review');
+
+      // Save imagePrompt for later use when challenge starts (with selected vocab words)
+      if (result.imagePrompt) {
+        setSavedImagePrompt(result.imagePrompt);
+      }
     } catch (err) {
       console.error(err);
     } finally {
@@ -168,6 +184,38 @@ const PracticeBank: React.FC<PracticeBankProps> = ({ profile, setProfile, onNewA
     setIsChallengeActive(true);
     setFeedbackTokens([]);
     setAgentThoughts([]);
+
+    // Generate image with selected vocabulary words for visual-anchor memorization
+    if (savedImagePrompt || selectedPhrases.length > 0) {
+      setIsGeneratingImage(true);
+      setImageError('');
+      const words = selectedPhrases.map(sp => sp.phrase).join(', ');
+      console.log('[ImageGen] triggering:', { savedImagePrompt: savedImagePrompt?.slice(0, 60), words });
+      fetch('/api/generate-image', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: savedImagePrompt, words }),
+      })
+        .then(r => {
+          if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
+          return r.json();
+        })
+        .then(data => {
+          console.log('[ImageGen] response:', data);
+          if (data.url) {
+            setSelectedQuestion(prev => prev ? { ...prev, visualUrl: data.url } : prev);
+          } else {
+            const errMsg = data.error || '后端返回空 URL (未知原因)';
+            console.warn('[ImageGen] failed:', errMsg);
+            setImageError(errMsg);
+          }
+        })
+        .catch(err => {
+          console.error('[ImageGen] failed:', err);
+          setImageError(`请求失败: ${err.message}`);
+        })
+        .finally(() => setIsGeneratingImage(false));
+    }
     
     await speak(selectedQuestion.questionEn);
 
@@ -206,7 +254,8 @@ const PracticeBank: React.FC<PracticeBankProps> = ({ profile, setProfile, onNewA
   const evaluateSpokenRecall = async (audioBlob: Blob) => {
     setIsAnalyzing(true);
     try {
-      const result = await callIELTSAgent(audioBlob, activeTab, selectedQuestion?.questionEn || '', profile.currentLevel);
+      const anchorWords = selectedPhrases.map(p => p.phrase);
+      const result = await callIELTSAgent(audioBlob, activeTab, selectedQuestion?.questionEn || '', profile.currentLevel, anchorWords);
       
       for (const t of result.agent_thoughts) {
         await new Promise(r => setTimeout(r, 600));
@@ -219,13 +268,71 @@ const PracticeBank: React.FC<PracticeBankProps> = ({ profile, setProfile, onNewA
         return;
       }
 
+      // Build pronunciation lookup maps
+      const pronFeedback = result.pronunciationFeedback || [];
+      // Map: lowercase recognized_as → PronunciationItem (for mispronounced words)
+      const mispronounced = new Map<string, PronunciationItem>();
+      // Map: lowercase anchor word → PronunciationItem (for correct words)
+      const correctAnchors = new Map<string, PronunciationItem>();
+      const missingAnchors: PronunciationItem[] = [];
+
+      for (const pf of pronFeedback) {
+        if (pf.status === "mispronounced" && pf.recognized_as) {
+          // Split recognized_as in case it spans multiple words (e.g. "root teen")
+          mispronounced.set(pf.recognized_as.toLowerCase(), pf);
+        } else if (pf.status === "correct") {
+          correctAnchors.set(pf.word.toLowerCase(), pf);
+        } else if (pf.status === "missing") {
+          missingAnchors.push(pf);
+        }
+      }
+
       const words = transcription.split(/\s+/).filter(w => w.trim().length > 0);
       
       const tokens: FeedbackToken[] = words.map(w => {
         const cleanWord = w.toLowerCase().replace(/[.,!?;:]/g, '');
+
+        // Check if this word is part of a mispronounced recognized_as
+        for (const [recognized, pf] of mispronounced.entries()) {
+          if (recognized.includes(cleanWord) || cleanWord.includes(recognized)) {
+            return {
+              text: w,
+              isPhraseMatched: false,
+              pronunciationStatus: "mispronounced" as const,
+              ipa: pf.ipa || "",
+              hint: pf.hint || "",
+              correctWord: pf.word,
+            };
+          }
+        }
+
+        // Check if this word matches a correctly pronounced anchor
+        for (const [anchor] of correctAnchors.entries()) {
+          if (anchor.includes(cleanWord) || cleanWord.includes(anchor)) {
+            return {
+              text: w,
+              isPhraseMatched: true,
+              pronunciationStatus: "correct" as const,
+            };
+          }
+        }
+
+        // Fallback: simple phrase match (for non-anchor words)
         const isMatched = selectedPhrases.some(p => p.phrase.toLowerCase().includes(cleanWord) || cleanWord.includes(p.phrase.toLowerCase()));
         return { text: w, isPhraseMatched: isMatched };
       });
+
+      // Append missing anchor words as special tokens
+      for (const m of missingAnchors) {
+        tokens.push({
+          text: `[${m.word}]`,
+          isPhraseMatched: false,
+          pronunciationStatus: "mispronounced",
+          ipa: m.ipa || "",
+          hint: m.hint || "未检测到该词",
+          correctWord: m.word,
+        });
+      }
 
       let i = 0;
       setFeedbackTokens([]);
@@ -241,6 +348,25 @@ const PracticeBank: React.FC<PracticeBankProps> = ({ profile, setProfile, onNewA
           setIsAnalyzing(false);
         }
       }, 150);
+
+      // Save detected errors to profile for the error notebook
+      if (result.detectedErrors && result.detectedErrors.length > 0) {
+        const newErrors: SpeakingError[] = result.detectedErrors.map((e, idx) => ({
+          id: `prac-${Date.now()}-${idx}`,
+          type: (e.type as SpeakingError['type']) || 'pronunciation',
+          original: e.original || '',
+          correction: e.correction || '',
+          explanation: e.explanation || '',
+          date: new Date().toLocaleDateString(),
+          practiced: false,
+          recallCount: 0,
+          questionId: selectedQuestion?.id,
+        }));
+        setProfile({
+          ...profile,
+          errors: [...newErrors, ...profile.errors],
+        });
+      }
 
     } catch (err) {
       console.error("Evaluation failed", err);
@@ -480,10 +606,10 @@ const PracticeBank: React.FC<PracticeBankProps> = ({ profile, setProfile, onNewA
                    <div className="p-10 bg-indigo-50 border-4 border-indigo-600 rounded-[40px] shadow-[8px_8px_0_#4f46e5] relative">
                       {renderPolishedTextWithDiscovery()}
                       <div className="text-indigo-400 font-bold text-sm border-t-2 border-indigo-100 pt-6 italic flex items-center gap-2">
-                        <span>参考释义：{selectedQuestion.answerCn}</span>
-                        <button onClick={() => speak(selectedQuestion.answerCn)} className="text-xl hover:scale-125 transition-transform disabled:opacity-30" disabled={isSpeaking}>
+                        <button onClick={() => speak(selectedQuestion.answerEn)} className="text-xl hover:scale-125 transition-transform disabled:opacity-30" disabled={isSpeaking} title="朗读英文">
                           {isSpeaking ? '💬' : '🔊'}
                         </button>
+                        <span>参考释义：{selectedQuestion.answerCn}</span>
                       </div>
                    </div>
                    <div className="bg-emerald-50 p-8 rounded-[40px] border-4 border-dashed border-emerald-400 min-h-[100px]">
@@ -512,6 +638,12 @@ const PracticeBank: React.FC<PracticeBankProps> = ({ profile, setProfile, onNewA
                            </div>
                          ) : selectedQuestion.visualUrl ? (
                            <img src={selectedQuestion.visualUrl} className="w-full h-full object-cover pixelated" alt="Scene" />
+                         ) : imageError ? (
+                           <div className="text-center px-6 max-w-full">
+                              <div className="text-3xl mb-2">⚠️</div>
+                              <p className="text-xs font-black text-red-500 mb-1">图片生成失败</p>
+                              <p className="text-[10px] font-mono text-red-400 break-words leading-relaxed">{imageError}</p>
+                           </div>
                          ) : (
                            <div className="text-center text-slate-300 text-5xl">🖼️</div>
                          )}
@@ -585,9 +717,31 @@ const PracticeBank: React.FC<PracticeBankProps> = ({ profile, setProfile, onNewA
                       <div className="flex flex-wrap gap-3 min-h-[80px] content-start">
                         {feedbackTokens.map((t, idx) => (
                           t && (
-                            <span key={idx} className={`px-4 py-2 rounded-2xl font-black text-lg animate-in zoom-in duration-300 ${t.isPhraseMatched ? 'bg-emerald-100 text-emerald-700 ring-4 ring-emerald-500 scale-110 z-10' : 'text-slate-600 bg-white shadow-sm border-2 border-slate-100'}`}>
-                              {t.text}
-                            </span>
+                            <div key={idx} className="relative group">
+                              <span
+                                onClick={() => {
+                                  if (t.pronunciationStatus === 'mispronounced' && t.correctWord) {
+                                    speak(t.correctWord);
+                                  }
+                                }}
+                                className={`px-4 py-2 rounded-2xl font-black text-lg animate-in zoom-in duration-300 inline-block ${
+                                  t.pronunciationStatus === 'mispronounced'
+                                    ? 'bg-red-100 text-red-700 ring-4 ring-red-500 animate-shake cursor-pointer hover:bg-red-200'
+                                    : t.isPhraseMatched
+                                    ? 'bg-emerald-100 text-emerald-700 ring-4 ring-emerald-500 scale-110 z-10'
+                                    : 'text-slate-600 bg-white shadow-sm border-2 border-slate-100'
+                                }`}>
+                                {t.text}
+                              </span>
+                              {t.pronunciationStatus === 'mispronounced' && (
+                                <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block bg-slate-900 text-white p-3 rounded-xl text-xs whitespace-nowrap z-50 shadow-xl border border-slate-700">
+                                  <div className="font-black text-emerald-400">{t.correctWord} <span className="font-mono text-emerald-300">{t.ipa}</span></div>
+                                  {t.hint && <div className="text-slate-300 mt-1">{t.hint}</div>}
+                                  <div className="text-slate-400 mt-1">点击听发音</div>
+                                  <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-slate-900"></div>
+                                </div>
+                              )}
+                            </div>
                           )
                         ))}
                       </div>

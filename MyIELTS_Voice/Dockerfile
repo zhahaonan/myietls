@@ -13,8 +13,6 @@ RUN (useradd -m -u 1000 user || true) && \
 USER user
 
 ENV PYTHONPATH=/home/user/app:$PYTHONPATH
-ENV GRADIO_SERVER_NAME=0.0.0.0
-ENV GRADIO_SERVER_PORT=7860
 
 EXPOSE 7860
 
