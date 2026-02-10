@@ -207,13 +207,13 @@ async def api_generate_image(req: ImageRequest):
         if req.words and req.words.strip():
             word_list = req.words.strip()
             enhanced_prompt = (
-                f"A single vivid illustration that visually represents these English words: {word_list}. "
-                f"Each word should be clearly depicted as a distinct visual element in the scene. "
-                f"Context: {req.prompt.strip()}. "
-                f"Style: clean, colorful, educational illustration with clear visual metaphors."
+                f"A photorealistic scene without any text, words, labels, or watermarks. "
+                f"The scene naturally shows: {word_list}. "
+                f"Scene context: {req.prompt.strip()}. "
+                f"Style: high quality photograph, vivid colors, no text overlay, no captions, no annotations."
             )
         else:
-            enhanced_prompt = req.prompt.strip()
+            enhanced_prompt = req.prompt.strip() + " No text, no labels, no words in the image."
 
         url = generate_image(enhanced_prompt)
         return {"url": url}
